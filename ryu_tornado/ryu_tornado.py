@@ -7,15 +7,16 @@ from ryu.ofproto import ofproto_v1_2, ofproto_v1_2_parser
 from ryu.ofproto import ofproto_v1_3, ofproto_v1_3_parser
 from ryu.controller import dispatcher, handler, ofp_event
 
-class OpenflowControllerBase(TCPServer):
+class DatapathBase(object):
     supported_ofp_version = {
         ofproto_v1_0.OFP_VERSION: (ofproto_v1_0, ofproto_v1_0_parser),
         ofproto_v1_2.OFP_VERSION: (ofproto_v1_2, ofproto_v1_2_parser),
         ofproto_v1_3.OFP_VERSION: (ofproto_v1_3, ofproto_v1_3_parser)
     }
 
-    def __init__(self):
-        super(OpenflowControllerBase, self).__init__()
+    def __init__(self, stream, address):
+        self.stream = stream
+        self.address = address
         self.set_version(max(self.supported_ofp_version))
         self.xid = random.randint(0, self.ofproto.MAX_XID)
 
@@ -42,13 +43,11 @@ class OpenflowControllerBase(TCPServer):
         if xid is None:
             xid = self.set_xid(msg)
         msg.serialize()
+        print "<<", msg
         self.send(msg.buf)
         return xid
 
-    def handle_stream(self, stream, address):
-        self.stream = stream
-        self.address = address
-        
+    def start(self):
         self.send_msg(self.ofproto_parser.OFPHello(self))
         if not self.stream.closed():
             self.stream.read_bytes(ofproto_common.OFP_HEADER_SIZE, stack_context.wrap(self._on_header))
@@ -66,15 +65,16 @@ class OpenflowControllerBase(TCPServer):
         assert len(data) == msg_len - ofproto_common.OFP_HEADER_SIZE
         msg = ofproto_parser.msg(self, version, msg_type, msg_len, xid, self._msg_header+data)
         self.dispatch(msg)
+        print ">>", msg
         if not self.stream.closed():
             self.stream.read_bytes(ofproto_common.OFP_HEADER_SIZE, stack_context.wrap(self._on_header))
 
     def dispatch(self, msg):
         raise Exception("Subclass must implement this")
 
-class OpenflowController(OpenflowControllerBase):
-    def __init__(self):
-        super(OpenflowController, self).__init__()
+class Datapath(DatapathBase):
+    def __init__(self, stream, address):
+        super(Datapath, self).__init__(stream, address)
         self.flow_format = ofproto_v1_0.NXFF_OPENFLOW10
 
     def send_packet_out(self, buffer_id=0xffffffff, in_port=None,
@@ -141,9 +141,9 @@ class OpenflowController(OpenflowControllerBase):
         self.send_msg(set_format)
         self.send_barrier()
 
-class EventOpenflowController(OpenflowController):
-    def __init__(self):
-        super(EventOpenflowController, self).__init__()
+class EventDatapath(Datapath):
+    def __init__(self, stream, address):
+        super(EventDatapath, self).__init__(stream, address)
         self.ev_q = dispatcher.EventQueue(handler.QUEUE_NAME_OFP_MSG,
                                 handler.HANDSHAKE_DISPATCHER, self)
 
@@ -151,6 +151,10 @@ class EventOpenflowController(OpenflowController):
         self.ev_q.queue(ofp_event.ofp_msg_to_ev(msg))
 
     def close(self):
-        super(EventOpenflowController, self).close()
+        super(EventDatapath, self).close()
         self.ev_q.set_dispatcher(handler.DEAD_DISPATCHER)
         self.ev_q.close()
+
+class OpenflowController(TCPServer):
+    def handle_stream(self, stream, address):
+        EventDatapath(stream, address).start()

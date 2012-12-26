@@ -4,7 +4,7 @@ from tornado.web import Application
 from tornado.websocket import WebSocketHandler
 from tornado.netutil import bind_sockets
 from tornado.process import fork_processes
-from ryu_tornado import EventOpenflowController
+from ryu_tornado import OpenflowController
 
 class Echo(WebSocketHandler):
     def open(self):
@@ -21,6 +21,6 @@ apps.load_apps(["ryu.controller.ofp_handler",])
 contexts = apps.create_contexts()
 apps.instantiate_apps(**contexts)
 
-EventOpenflowController().listen(6633)
+OpenflowController().listen(6633)
 
 IOLoop.instance().start()

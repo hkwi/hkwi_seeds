@@ -1,3 +1,4 @@
+import logging
 import random
 from tornado import stack_context
 from tornado.netutil import TCPServer
@@ -43,7 +44,7 @@ class DatapathBase(object):
         if xid is None:
             xid = self.set_xid(msg)
         msg.serialize()
-        print "<<", msg
+        logging.getLogger("openflow").debug("SEND %s %s" % (self.address, msg))
         self.send(msg.buf)
         return xid
 
@@ -64,8 +65,8 @@ class DatapathBase(object):
         (version, msg_type, msg_len, xid) = ofproto_parser.header(self._msg_header)
         assert len(data) == msg_len - ofproto_common.OFP_HEADER_SIZE
         msg = ofproto_parser.msg(self, version, msg_type, msg_len, xid, self._msg_header+data)
+        logging.getLogger("openflow").debug("RECV %s %s" % (self.address, msg))
         self.dispatch(msg)
-        print ">>", msg
         if not self.stream.closed():
             self.stream.read_bytes(ofproto_common.OFP_HEADER_SIZE, stack_context.wrap(self._on_header))
 

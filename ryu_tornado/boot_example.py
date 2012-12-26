@@ -6,6 +6,9 @@ from tornado.netutil import bind_sockets
 from tornado.process import fork_processes
 from ryu_tornado import OpenflowController
 
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
 class Echo(WebSocketHandler):
     def open(self):
         print "hello"
@@ -17,7 +20,7 @@ class Echo(WebSocketHandler):
 Application([("/", Echo),],).listen(8888)
 
 apps = AppManager()
-apps.load_apps(["ryu.controller.ofp_handler",])
+apps.load_apps(["ryu.controller.ofp_handler", "ryu.app.simple_switch"])
 contexts = apps.create_contexts()
 apps.instantiate_apps(**contexts)
 

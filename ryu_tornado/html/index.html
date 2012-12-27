@@ -1,0 +1,9 @@
+<html><body>
+hello
+<script type="text/javascript">
+var ws = new WebSocket("ws://192.168.1.40:8888/echo")
+ws.onmessage = function(message){
+    console.log(message.data);
+}
+</script>
+</body></html>

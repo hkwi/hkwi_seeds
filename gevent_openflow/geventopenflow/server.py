@@ -47,7 +47,7 @@ class Bus(object):
 class BarrieredBus(Bus):
 	def __init__(self, connection_class, **kwargs):
 		super(BarrieredBus, self).__init__(connection_class, **kwargs)
-		self.upstream = kwargs["upstream"]
+		self.upstream_send = kwargs["upstream_send"]
 		self.barriers = dict()
 		self.connections = set()
 		self.current_connection = None
@@ -58,7 +58,7 @@ class BarrieredBus(Bus):
 		
 		if not self.barriered and self.current_connection != connection:
 			xid = barrier_xid()
-			self.upstream.send(ofp_header_only(18, xid=xid))
+			self.upstream_send(ofp_header_only(18, xid=xid))
 			lock = AsyncResult()
 			self.barriers[xid] = lock
 			try:
@@ -67,7 +67,7 @@ class BarrieredBus(Bus):
 				del(self.barriers[xid])
 		
 		self.current_connection = connection
-		self.upstream.send(message)
+		self.upstream_send(message)
 		
 		(v,oftype,l,xid) = parse_ofp_header(message)
 		if oftype==18 and v==1:
@@ -239,7 +239,7 @@ class Switch(Connection):
 class ProxySwitch(Switch):
 	def __init__(self, *args, **kwargs):
 		super(ProxySwitch, self).__init__(*args, **kwargs)
-		self.upstream = kwargs["upstream"]
+		assert self.bus.proxy_up, "ProxySwitch will use bus#proxy_up"
 	
 	def handle_message(self, message):
 		'''
@@ -292,7 +292,7 @@ class OvsController(Controller):
 		s.bind(socket_fname)
 		s.listen(1)
 		with self.ofctl_lock:
-			self.ofctl_proxy = BarrieredBus(ProxySwitch, upstream=self)
+			self.ofctl_proxy = BarrieredBus(ProxySwitch, upstream_send=self._send_by_ofctl)
 			server = StreamServer(s, handle=self.ofctl_proxy)
 			server.start()
 			
@@ -308,13 +308,17 @@ class OvsController(Controller):
 			if self.ofctl_logger:
 				self.ofctl_logger.debug("stdout: %s" % pstdout)
 			if p.poll():
-				self.logger.error("stderr: %s" % pstderr)
+				self.logger.error("stderr: %s" % pstderr, exc_info=True)
 			
 			server.stop()
 			self.ofctl_proxy = None
 		os.remove(socket_fname)
 		
 		return pstdout
+	
+	def _send_by_ofctl(self, message):
+		# subclass may replace this
+		self.send(message)
 	
 	def _make_ofctl_options(self, options):
 		# key name, double hyphn, take arg type, join with equal
@@ -369,6 +373,8 @@ class OvsController(Controller):
 					ret.append(sval)
 		
 		return ret
+
+
 
 if __name__ == "__main__":
 	logging.basicConfig(level=0)

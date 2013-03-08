@@ -113,6 +113,7 @@ class BarrieredHandle(Handle):
 
 class Connection(object):
 	io_logger = None
+	io_log_suppress_echo = None
 	def __init__(self, socket, address, parent, **kwargs):
 		self.socket = socket
 		self.address = address
@@ -122,6 +123,7 @@ class Connection(object):
 		io_logger_name = kwargs.get("io_logger_name")
 		if io_logger_name:
 			self.io_logger = logging.getLogger(io_logger_name)
+		self.io_log_suppress_echo = kwargs.get("io_log_suppress_echo")
 		
 		self.sendq = Queue()
 	
@@ -175,7 +177,7 @@ class Connection(object):
 					return
 				assert len(message) == OFP_HEADER_LEN, "Read error in openflow message header."
 				
-				(v,t,message_len,x) = parse_ofp_header(bytes(message))
+				(v,oftype,message_len,x) = parse_ofp_header(bytes(message))
 				while len(message) < message_len and not self.closed:
 					ext = self.socket.recv(message_len-len(message))
 					if len(ext) == 0:
@@ -185,7 +187,10 @@ class Connection(object):
 				
 				message = bytes(message)
 				if self.io_logger:
-					self._log_io("recv", message)
+					if oftype in (2,3) and self.io_log_suppress_echo:
+						pass
+					else:
+						self._log_io("recv", message)
 				gevent.spawn(self.handle_message, message)
 			except:
 				self.logger.error("Openflow message read error.", exc_info=True)
@@ -207,7 +212,11 @@ class Connection(object):
 			try:
 				message = self.sendq.get()
 				if self.io_logger:
-					self._log_io("send", message)
+					(version, oftype, length, xid) = parse_ofp_header(message)
+					if oftype in (2,3) and self.io_log_suppress_echo:
+						pass
+					else:
+						self._log_io("send", message)
 				self.socket.sendall(message)
 			except:
 				self.logger.error("Openflow message write error.", exc_info=True)
@@ -459,7 +468,7 @@ class OvsController(Controller):
 
 if __name__ == "__main__":
 	logging.basicConfig(level=0)
-	handle = Handle(InverseController, io_logger_name="root")
+	handle = Handle(InverseController, io_logger_name="root", io_log_suppress_echo=True)
 #	handle=Handle(OvsController, io_logger_name="root", ofctl_logger_name="root")
 #	handle=Handle(Controller, io_logger_name="root")
 	server = StreamServer(("0.0.0.0",6633), handle=handle)

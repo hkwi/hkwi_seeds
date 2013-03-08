@@ -18,7 +18,7 @@ from gevent.queue import Queue
 from gevent.server import StreamServer
 
 def parse_ofp_header(message):
-	return list(struct.unpack_from("!BBHI", message))
+	return struct.unpack_from("!BBHI", message)
 
 def ofp_header_only(oftype, version=1, xid=None):
 	if xid is None:
@@ -36,20 +36,31 @@ def hms_xid():
 def barrier_xid():
 	return long("f%07x" % (random.random()*0xFFFFFFF), 16)
 
-class Bus(object):
+class Handle(object):
+	'''
+	Server handle function that can have some configurations.
+	The signature for connection_class is func(socket, address, handle, **kwargs)
+	'''
 	def __init__(self, connection_class, **kwargs):
 		self.connection_class = connection_class
 		self.kwargs = kwargs
+		self.connections = set()
 	
 	def __call__(self, socket, address):
-		self.connection_class(socket, address, self, **self.kwargs).handle()
+		con = self.connection_class(socket, address, self, **self.kwargs)
+		self.connections.add(con)
+		con.handle()
+		self.connections.remove(con)
+	
+	def shutdown(self,):
+		for connection in self.connections:
+			connection.close()
 
-class BarrieredBus(Bus):
+class BarrieredHandle(Handle):
 	def __init__(self, connection_class, **kwargs):
-		super(BarrieredBus, self).__init__(connection_class, **kwargs)
+		super(BarrieredHandle, self).__init__(connection_class, **kwargs)
 		self.upstream_send = kwargs["upstream_send"]
 		self.barriers = dict()
-		self.connections = set()
 		self.current_connection = None
 		self.barriered = False
 	
@@ -62,28 +73,27 @@ class BarrieredBus(Bus):
 			lock = AsyncResult()
 			self.barriers[xid] = lock
 			try:
-				assert lock.get(), "barrier failed"
+				assert lock.get(), "barrier failed."
 			finally:
 				del(self.barriers[xid])
 		
 		self.current_connection = connection
-		self.upstream_send(message)
-		
-		(v,oftype,l,xid) = parse_ofp_header(message)
-		if oftype==18 and v==1:
+		(version, oftype, length, xid) = parse_ofp_header(message)
+		if (oftype==18 and version==1) or (oftype==20 and version!=1):
 			self.barriered = True
 		else:
 			self.barriered = False
+		
+		self.upstream_send(message)
 	
 	def proxy_down(self, message):
-		(v,t,l,xid) = parse_ofp_header(message)
-		
 		if self.current_connection:
 			self.current_connection.send(message)
 		
+		(version, oftype, length, xid) = parse_ofp_header(message)
 		lock = self.barriers.get(xid)
 		if lock:
-			lock.set(t==19) # check if that was barrier reply, or error
+			lock.set((version==1 and oftype==19) or (version!=1 and oftype==21)) # check if that was barrier reply, or error
 	
 	def __call__(self, socket, address):
 		con = self.connection_class(socket, address, self, **self.kwargs)
@@ -94,17 +104,19 @@ class BarrieredBus(Bus):
 		if self.current_connection is con:
 			self.current_connection = None
 	
-	def close(self):
+	def shutdown(self):
 		for (xid, barrier) in self.barriers.items():
 			barrier.set(False)
+		for connection in self.connections:
+			connection.close()
 		assert len(self.barriers)==0, "cleanup failed"
 
 class Connection(object):
 	io_logger = None
-	def __init__(self, socket, address, bus, **kwargs):
+	def __init__(self, socket, address, parent, **kwargs):
 		self.socket = socket
 		self.address = address
-		self.bus = bus
+		self.parent = parent
 		
 		self.logger = logging.getLogger(kwargs.get("logger_name"))
 		io_logger_name = kwargs.get("io_logger_name")
@@ -130,7 +142,7 @@ class Connection(object):
 		self.io_logger.info("%s %s" % (direction,zdata))
 	
 	def _ofp_common_fields(self, message):
-		reqseq = parse_ofp_header(message)
+		reqseq = list(parse_ofp_header(message))
 		reqseq.append(message[8:])
 		return zip(("version", "type", "length", "xid", "payload"), reqseq)
 	
@@ -141,7 +153,7 @@ class Connection(object):
 		self.send(ofp_header_only(oftype, version=version, xid=xid))
 	
 	def send_hello(self):
-		# subclass may replace this.
+		# subclass may replace this, to change openflow version.
 		self.send_header_only(0) # send OFP_HELLO
 	
 	def handle(self):
@@ -184,8 +196,8 @@ class Connection(object):
 		# Convenient method for ofp echo_reply. Subclass may use this.
 		#
 		# Both controller and switch will send echo reply
-		(v,t,l,x) = parse_ofp_header(message)
-		self.send(struct.pack("!BBHI", v, 3, l+8, x)+message)
+		(version, oftype, length, xid) = parse_ofp_header(message)
+		self.send(struct.pack("!BBHI", version, 3, 8+length, xid)+message)
 	
 	def handle_message(self, message):
 		warnings.warn("subclass must override this method")
@@ -208,38 +220,49 @@ class Controller(Connection):
 		self.barriered = False
 	
 	def packet_in(self, message):
-		(v,t,l,x) = parse_ofp_header(message)
-		(buffer_id,total_len,in_port,reason,pad) = struct.unpack_from("!IHHBB", message, offset=8)
-		idx = ("buffer_id", "total_len", "in_port", "reason", "pad")
+		'''
+		Default packet_in handler for openvswitch use this for heartbeat check.
+		'''
+		(version, oftype, length, xid) = parse_ofp_header(message)
+		(buffer_id, ) = struct.unpack_from("!I", message, offset=8)
+		# default action "do nothing about that buffer"
+		if version==1:
+			msg = struct.pack("!IHH", buffer_id, 0xffff, 0) # OFPP_NONE=0xffff
+		else:
+			msg = struct.pack("!IIHHI", buffer_id, 0xffffffff, 0, 0, 0) # OFPP_CONTROLLER=0xffffffff
 		
-		msg = struct.pack("!IHH", buffer_id, 0xffff, 0) # default action "do nothing about that buffer"
-		self.send(struct.pack("!BBHI", 0x01, 13, 8+len(msg), x)+msg)
+		self.send(struct.pack("!BBHI", version, 13, 8+len(msg), xid)+msg) # OFPT_PACKET_OUT=13
 	
 	def handle_message(self, message):
-		# default handle
-		(v,oftype,l,x) = parse_ofp_header(message)
+		(version, oftype, length, xid) = parse_ofp_header(message)
 		
-		if oftype == 2 and self.echo_reply: # OFPT_ECHO_REQUEST is 2 in all versions of openflow (v1.0 to v1.3)
+		if oftype == 0:
+			pass
+		elif oftype == 2 and self.echo_reply: # OFPT_ECHO_REQUEST=2
 			self.echo_reply(message)
-		elif oftype == 10 and self.packet_in:
+		elif oftype == 10 and self.packet_in: # OFPT_PACKET_IN=10
 			self.packet_in(message)
 		else:
-			self.logger.warn("unhandled %s" % self._ofp_common_fields(), exc_info=True)
+			self.logger.warn("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
 
 class Switch(Connection):
 	def handle_message(self, message):
-		reqseq = parse_ofp_header(message)
-		if reqseq[1] == 2 and hasattr(self, "echo_reply") and self.echo_reply: # OFPT_ECHO_REQUEST is 2 in all versions of openflow (v1.0 to v1.3)
+		(version, oftype, length, xid) = parse_ofp_header(message)
+		if oftype == 0:
+			pass
+		elif oftype == 2 and self.echo_reply: # OFPT_ECHO_REQUEST=2
 			self.echo_reply(message)
-		elif reqseq[1] == 18 and hasattr(self, "barrier_reply") and self.barrier_reply:
-			self.send_header_only(19, xid=x) # barrier_reply
+		elif (version==1 and oftype==18):
+			self.send_header_only(19, xid=xid) # OFPT_BARRIER_REPLY=19 (v1.0)
+		elif (version!=1 and oftype==20):
+			self.send_header_only(21, xid=xid) # OFPT_BARRIER_REPLY=21
 		else:
-			self.logger.warn("unhandled %s" % self._ofp_common_fields(), exc_info=True)
+			self.logger.warn("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
 
 class ProxySwitch(Switch):
 	def __init__(self, *args, **kwargs):
 		super(ProxySwitch, self).__init__(*args, **kwargs)
-		assert self.bus.proxy_up, "ProxySwitch will use bus#proxy_up"
+		assert self.parent.proxy_up, "ProxySwitch will use Handle#proxy_up"
 	
 	def handle_message(self, message):
 		'''
@@ -250,7 +273,65 @@ class ProxySwitch(Switch):
 		if oftype==0: # ignore hello, because upstream proxy already connected.
 			pass
 		else:
-			self.bus.proxy_up(self, message)
+			self.parent.proxy_up(self, message)
+
+class InverseController(Controller):
+	'''
+	Creates a unix domain socket that accepts controller access (inverse connection direction).
+	'''
+	downstream_handle = None
+	downstream_server = None
+	downstream_file = None
+	def __init__(self, *args, **kwargs):
+		super(InverseController, self).__init__(*args, **kwargs)
+		self.socket_dir = kwargs.get("socket_dir")
+	
+	def handle_message(self, message):
+		(version, oftype, length, xid) = parse_ofp_header(message)
+		if oftype == 2 and self.echo_reply: # OFPT_ECHO_REQUEST=2
+			self.echo_reply(message)
+		else:
+			if self.downstream_handle:
+				self.downstream_handle.proxy_down(message)
+			else:
+				if oftype==0:
+					self.send_header_only(5) # OFPT_FEATURES_REQUEST=5
+				elif oftype==6: # OFPT_FEATURES_REPLY=6
+					(self.datapath,) = struct.unpack_from("!Q", message, offset=8)
+					
+					s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+					socket_fname = "dp_%x.sock" % (self.datapath,)
+					if self.socket_dir:
+						socket_fname = os.path.join(self.socket_dir, socket_fname)
+					s.bind(socket_fname)
+					s.listen(1)
+					
+					handle = BarrieredHandle(ProxySwitch, upstream_send=self._send_by_inverse) # may pass inverse_io_logger_name
+					server = StreamServer(s, handle=handle)
+					server.start()
+					
+					self.downstream_handle = handle
+					self.downstream_server = server
+					self.downstream_file = socket_fname
+				elif oftype == 10 and self.packet_in: # OFPT_PACKET_IN=10
+					self.packet_in(message)
+				else:
+					self.logger.warn("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
+	
+	def _send_by_inverse(self, message):
+		self.send(message)
+	
+	def close(self,):
+		if self.downstream_server:
+			self.downstream_server.stop()
+			self.downstream_server = None
+		if self.downstream_handle:
+			self.downstream_handle.shutdown()
+			self.downstream_handle = None
+		if self.downstream_file:
+			os.remove(self.downstream_file)
+			self.downstream_file = None
+		super(InverseController,self).close()
 
 class OvsController(Controller):
 	ofctl_logger = None
@@ -270,7 +351,7 @@ class OvsController(Controller):
 			self.ofctl_proxy.proxy_down(message)
 			return
 		
-		if oftype == 2: # OFPT_ECHO_REQUEST is 2 in all versions of openflow (v1.0 to v1.3)
+		if oftype == 2: # OFPT_ECHO_REQUEST=2
 			self.echo_reply(message)
 		elif oftype == 10:
 			self.packet_in(message)
@@ -292,8 +373,9 @@ class OvsController(Controller):
 		s.bind(socket_fname)
 		s.listen(1)
 		with self.ofctl_lock:
-			self.ofctl_proxy = BarrieredBus(ProxySwitch, upstream_send=self._send_by_ofctl)
-			server = StreamServer(s, handle=self.ofctl_proxy)
+			ofctl_proxy = BarrieredHandle(ProxySwitch, upstream_send=self._send_by_ofctl) # may pass ofctl_io_logger_name
+			self.ofctl_proxy = ofctl_proxy
+			server = StreamServer(s, handle=ofctl_proxy)
 			server.start()
 			
 			cmd = ["ovs-ofctl",]
@@ -311,6 +393,7 @@ class OvsController(Controller):
 				self.logger.error("stderr: %s" % pstderr, exc_info=True)
 			
 			server.stop()
+			ofctl_proxy.shutdown()
 			self.ofctl_proxy = None
 		os.remove(socket_fname)
 		
@@ -374,9 +457,13 @@ class OvsController(Controller):
 		
 		return ret
 
-
-
 if __name__ == "__main__":
 	logging.basicConfig(level=0)
-	server = StreamServer(("0.0.0.0",6633), handle=Bus(OvsController, io_logger_name="root", ofctl_logger_name="root"))
-	server.serve_forever()
+	handle = Handle(InverseController, io_logger_name="root")
+#	handle=Handle(OvsController, io_logger_name="root", ofctl_logger_name="root")
+#	handle=Handle(Controller, io_logger_name="root")
+	server = StreamServer(("0.0.0.0",6633), handle=handle)
+	try:
+		server.serve_forever()
+	finally:
+		handle.shutdown()

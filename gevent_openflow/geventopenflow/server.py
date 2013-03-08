@@ -67,7 +67,7 @@ class BarrieredHandle(Handle):
 	def proxy_up(self, connection, message):
 		assert connection is not None, "you must provide connection(yourself)"
 		
-		if not self.barriered and self.current_connection != connection:
+		if not self.barriered and self.current_connection != connection and len(self.connections) > 1:
 			xid = barrier_xid()
 			self.upstream_send(ofp_header_only(18, xid=xid))
 			lock = AsyncResult()
@@ -290,6 +290,8 @@ class InverseController(Controller):
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		if oftype == 2 and self.echo_reply: # OFPT_ECHO_REQUEST=2
 			self.echo_reply(message)
+		elif oftype == 10 and self.packet_in: # OFPT_PACKET_IN=10
+			self.packet_in(message)
 		else:
 			if self.downstream_handle:
 				self.downstream_handle.proxy_down(message)
@@ -313,8 +315,6 @@ class InverseController(Controller):
 					self.downstream_handle = handle
 					self.downstream_server = server
 					self.downstream_file = socket_fname
-				elif oftype == 10 and self.packet_in: # OFPT_PACKET_IN=10
-					self.packet_in(message)
 				else:
 					self.logger.warn("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
 	

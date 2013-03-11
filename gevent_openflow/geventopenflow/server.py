@@ -9,7 +9,6 @@ import gevent
 from gevent import socket
 from gevent import subprocess
 from gevent.event import AsyncResult
-from gevent.lock import RLock
 from gevent.queue import Queue
 from gevent.server import StreamServer
 
@@ -22,6 +21,7 @@ def ofp_header_only(oftype, version=1, xid=None):
 	return struct.pack("!BBHI", version, oftype, 8, xid)
 
 def hms_hex_xid():
+	'''Xid looks readable datetime like format when logged as hex.'''
 	now = datetime.datetime.now()
 	candidate = struct.unpack("!I", binascii.a2b_hex("%02d"*4 % (now.hour, now.minute, now.second, now.microsecond/10000)))[0]
 	if hasattr(hms_hex_xid, "dedup"):
@@ -31,6 +31,7 @@ def hms_hex_xid():
 	return candidate
 
 def hms_xid():
+	'''Xid looks readable datetime like format when logged as int.'''
 	now = datetime.datetime.now()
 	candidate = int(("%02d"*3+"%04d") % (now.hour, now.minute, now.second, now.microsecond/100))
 	if hasattr(hms_xid, "dedup"):
@@ -39,13 +40,16 @@ def hms_xid():
 	setattr(hms_xid, "dedup", candidate)
 	return candidate
 
-def barrier_xid():
-	return long("f%07x" % (random.random()*0xFFFFFFF), 16)
+class ConnectionException(Exception):
+	'''
+	AsyncResult failed due to connection close.
+	'''
+	pass
 
 class Handle(object):
 	'''
 	Server handle function that can have some configurations.
-	The signature for connection_class is func(socket, address, handle, **kwargs)
+	The signature for connection_class is func(socket, address, **kwargs)
 	'''
 	def __init__(self, connection_class, **kwargs):
 		self.connection_class = connection_class
@@ -211,18 +215,21 @@ class Barrier(object):
 		assert (oftype==19 and version==1) or (oftype==21 and version!=1), "barrier failed: %s" % binascii.b2a_hex(message)
 
 class BarrieredController(Controller):
-	datapathAsyncResult = None
+	featuresAsyncResult = None
 	def __init__(self, *args, **kwargs):
 		super(BarrieredController, self).__init__(*args, **kwargs)
 		self.callback = self.handle_message # default callback
 		self.barriers = []
 	
-	@property
-	def datapath(self):
-		if self.datapathAsyncResult is None:
-			self.datapathAsyncResult = AsyncResult()
+	def datapath(self, wait=True):
+		if self.featuresAsyncResult is None:
+			self.featuresAsyncResult = AsyncResult()
 			self.send_header_only(5) # OFPT_FEATURES_REQUEST
-		return self.datapathAsyncResult.get()
+		
+		if wait or self.featuresAsyncResult.value:
+			(datapath,) = struct.unpack_from("!Q", self.featuresAsyncResult.get(), offset=8)
+			return datapath
+		return None
 	
 	def _callback_undef(self, message):
 		self.logger.error("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
@@ -259,8 +266,7 @@ class BarrieredController(Controller):
 			self.echo_reply(message)
 		
 		if oftype == 6: # OFPT_FEATURES_REPLY
-			(datapath,) = struct.unpack_from("!Q", message, offset=8)
-			self.datapathAsyncResult.set(datapath)
+			self.featuresAsyncResult.set(message)
 		
 		if len(self.barriers) and xid == self.barriers[0].xid:
 			barrier = self.barriers.pop(0)
@@ -271,6 +277,11 @@ class BarrieredController(Controller):
 			barrier.callback(message)
 		else:
 			self.callback(message)
+
+	def close(self):
+		if self.featuresAsyncResult and self.featuresAsyncResult.value is None:
+			self.featuresAsyncResult.set_exception(ConnectionException("connection closed."))
+		super(BarrieredController, self).close()
 
 class Switch(Connection):
 	def handle_message(self, message):
@@ -338,7 +349,7 @@ class OvsController(BarrieredController):
 		
 		if hasattr(socket, "AF_UNIX"):
 			s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-			socket_path = "dp_%x_internal_%d.sock" % (self.datapath, 1000*random.random())
+			socket_path = "dp_%x_internal_%d.sock" % (self.datapath(), 1000*random.random())
 			if self.socket_dir:
 				socket_path = os.path.join(self.socket_dir, socket_fname)
 			s.bind(socket_fname)
@@ -445,7 +456,7 @@ class InverseController(OvsController):
 			self.logger.warn("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
 		
 		if self.downstream_server is None and hasattr(socket, "AF_UNIX"):
-			socket_fname = "dp_%x.sock" % (self.datapath,)
+			socket_fname = "dp_%x.sock" % (self.datapath(),)
 			if self.socket_dir:
 				socket_fname = os.path.join(self.socket_dir, socket_fname)
 			
@@ -466,7 +477,7 @@ class InverseController(OvsController):
 		if self.downstream_file:
 			os.remove(self.downstream_file)
 			self.downstream_file = None
-		super(InverseController,self).close()
+		super(InverseController, self).close()
 
 if __name__ == "__main__":
 	logging.basicConfig(level=0)

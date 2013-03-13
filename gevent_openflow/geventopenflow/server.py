@@ -285,9 +285,7 @@ class Barrier(object):
 	
 	def __call__(self, message):
 		if self.this_callback:
-			(version, oftype, length, xid) = parse_ofp_header(message)
-			assert xid == self.xid, "Message in barrier gap: %s" % binascii.b2a_hex(message)
-			assert (oftype==19 and version==1) or (oftype==21 and version!=1), "barrier failed: %s" % binascii.b2a_hex(message)
+			self.this_callback(message)
 
 class BarrieredController(Controller):
 	featuresAsyncResult = None
@@ -428,6 +426,12 @@ class OvsController(BarrieredController):
 			result = self.ofctl("dump-flows")
 			result = self.ofctl("dump-tables")
 	
+	def add_flow(self, flow):
+		return self.ofctl("add-flow", flow)
+	
+	def del_flows(self):
+		return self.ofctl("del-flows")
+	
 	def ofctl(self, action, *args, **options):
 		pstdout = None
 		
@@ -435,8 +439,8 @@ class OvsController(BarrieredController):
 			s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 			socket_path = "dp_%x_internal_%d.sock" % (self.datapath(), 1000*random.random())
 			if self.socket_dir:
-				socket_path = os.path.join(self.socket_dir, socket_fname)
-			s.bind(socket_fname)
+				socket_path = os.path.join(self.socket_dir, socket_path)
+			s.bind(socket_path)
 		else:
 			s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 			s.bind(("127.0.0.1", 0))

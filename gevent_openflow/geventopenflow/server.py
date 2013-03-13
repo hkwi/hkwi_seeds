@@ -54,10 +54,23 @@ class Handle(object):
 	def __init__(self, connection_class, **kwargs):
 		self.connection_class = connection_class
 		self.kwargs = kwargs
+		self.connections = set()
 	
 	def __call__(self, socket, address):
 		con = self.connection_class(socket, address, **self.kwargs)
+		self.connections.add(con)
 		con.handle()
+		self.connections.remove(con)
+	
+	def __enter__(self):
+		return self
+	
+	def __exit__(self, exc_type, exc_value, traceback):
+		self.close()
+	
+	def close(self):
+		for con in self.connections:
+			con.close()
 
 class Connection(object):
 	io_logger = None
@@ -88,7 +101,7 @@ class Connection(object):
 	
 	def _log_io(self, direction, message):
 		zdata = self._ofp_common_fields(message)
-		self.io_logger.info("%s %s" % (direction,zdata))
+		self.io_logger.info("%s(%x)%s %s" % (self.__class__.__name__, id(self), direction, zdata))
 	
 	def _ofp_common_fields(self, message):
 		reqseq = list(parse_ofp_header(message))
@@ -121,7 +134,7 @@ class Connection(object):
 						break
 					message += ext
 				if len(message) == 0: # normal shutdown
-					return
+					break
 				assert len(message) == OFP_HEADER_LEN, "Read error in openflow message header."
 				
 				(v,oftype,message_len,x) = parse_ofp_header(bytes(message))
@@ -141,8 +154,8 @@ class Connection(object):
 				gevent.spawn(self._handle_message, message)
 			except:
 				self.logger.error("Openflow message read error.", exc_info=True)
-				self.close()
 				break
+		self.close()
 	
 	def echo_reply(self, message):
 		# Convenient method for ofp echo_reply. Subclass may use this.
@@ -202,17 +215,16 @@ class Controller(Connection):
 			self.packet_in(message)
 
 class Barrier(object):
-	def __init__(self, xid, next_callback, callback=None):
+	def __init__(self, xid, next_callback=None, this_callback=None):
 		self.xid = xid
 		self.next_callback = next_callback
-		if callback is None:
-			callback = self
-		self.callback = callback
+		self.this_callback = this_callback
 	
 	def __call__(self, message):
-		(version, oftype, length, xid) = parse_ofp_header(message)
-		assert xid == self.xid, "Message in barrier gap: %s" % binascii.b2a_hex(message)
-		assert (oftype==19 and version==1) or (oftype==21 and version!=1), "barrier failed: %s" % binascii.b2a_hex(message)
+		if self.this_callback:
+			(version, oftype, length, xid) = parse_ofp_header(message)
+			assert xid == self.xid, "Message in barrier gap: %s" % binascii.b2a_hex(message)
+			assert (oftype==19 and version==1) or (oftype==21 and version!=1), "barrier failed: %s" % binascii.b2a_hex(message)
 
 class BarrieredController(Controller):
 	featuresAsyncResult = None
@@ -220,6 +232,8 @@ class BarrieredController(Controller):
 		super(BarrieredController, self).__init__(*args, **kwargs)
 		self.callback = self.handle_message # default callback
 		self.barriers = []
+		self.last_callback = None
+		self.active_callback = None # Active responder callback. This may be None, _handle_message will take care
 	
 	def datapath(self, wait=True):
 		if self.featuresAsyncResult is None:
@@ -231,29 +245,31 @@ class BarrieredController(Controller):
 			return datapath
 		return None
 	
-	def _callback_undef(self, message):
-		self.logger.error("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
-	
 	def send(self, message, callback=None):
-		if callback is None:
-			callback = self.handle_message
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		if (oftype==18 and version==1) or (oftype==20 and version!=1): # OFPT_BARRIER_REQUEST
-			self.barriers.append(Barrier(xid, self._callback_undef, callback=callback))
-		elif len(self.barriers):
-			if self.barriers[-1].next_callback is self._callback_undef:
-				self.barriers[-1].next_callback = callback
-			elif self.barriers[-1].next_callback != callback:
-				barrier = Barrier(hms_xid(), callback)
-				self.barriers[-1].next_callback = barrier
-				barriers.append(barrier)
-				super(BarrieredController, self).send_header_only(18) # OFPT_BARRIER_REQUEST=18 (v1.0)
+			self.barriers.append(Barrier(xid, this_callback=callback))
+		else:
+			if self.last_callback != callback:
+				barrier = Barrier(hms_xid(), next_callback=callback)
+				self.barriers.append(barrier)
+				super(BarrieredController, self).send(ofp_header_only(18, xid=barrier.xid)) # OFPT_BARRIER_REQUEST=18 (v1.0)
 		
 		super(BarrieredController, self).send(message)
+		self.last_callback = callback
+	
+	def detach(self, callback):
+		for barrier in self.barriers:
+			if barrier.this_callback == callback:
+				barrier.this_callback = None
+			if barrier.next_callback == callback:
+				barrier.this_callback = None
+		if self.last_callback == callback:
+			self.last_callback = None
+		if self.active_callback == callback:
+			self.active_callback = None
 	
 	def send_header_only(self, oftype, version=1, xid=None, callback=None):
-		if callback is None:
-			callback = self.handle_message
 		self.send(ofp_header_only(oftype, version=version, xid=xid), callback=callback)
 	
 	def _handle_message(self, message):
@@ -270,13 +286,13 @@ class BarrieredController(Controller):
 		
 		if len(self.barriers) and xid == self.barriers[0].xid:
 			barrier = self.barriers.pop(0)
-			self.callback = barrier.next_callback
-			if self.callback is self._callback_undef:
-				assert len(self.barriers)==0, "barrier context build failure"
-				self.callback = self.handle_message # bottom context
-			barrier.callback(message)
+			barrier(message)
+			self.active_callback = barrier.next_callback
 		else:
-			self.callback(message)
+			callback = self.active_callback
+			if self.active_callback is None:
+				callback = self.handle_message
+			callback(message)
 
 	def close(self):
 		if self.featuresAsyncResult and self.featuresAsyncResult.value is None:
@@ -299,7 +315,7 @@ class ProxySwitch(Switch):
 	def __init__(self, *args, **kwargs):
 		super(ProxySwitch, self).__init__(*args, **kwargs)
 		self.upstream = kwargs["upstream"]
-		self.relay_echo = keargs.get("relay_echo")
+		self.relay_echo = kwargs.get("relay_echo")
 		if self.relay_echo:
 			self.echo_reply = None # upstream will be respond to echo
 	
@@ -322,6 +338,10 @@ class ProxySwitch(Switch):
 			pass # don't relay to downstream
 		else:
 			self.send(message)
+	
+	def close(self,):
+		self.upstream.detach(self.send_by_proxy)
+		super(ProxySwitch, self).close()
 
 class OvsController(BarrieredController):
 	ofctl_logger = None
@@ -446,14 +466,8 @@ class InverseController(OvsController):
 		super(InverseController, self).__init__(*args, **kwargs)
 		self.socket_dir = kwargs.get("socket_dir")
 	
-	def handle_message(self, message):
-		(version, oftype, length, xid) = parse_ofp_header(message)
-		if oftype in (0, 2, 6): # we know those will be used.
-			pass
-		elif oftype == 10 and self.packet_in: # OFPT_PACKET_IN=10
-			self.packet_in(message)
-		else:
-			self.logger.warn("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
+	def _handle_message(self, message):
+		super(InverseController, self)._handle_message(message)
 		
 		if self.downstream_server is None and hasattr(socket, "AF_UNIX"):
 			socket_fname = "dp_%x.sock" % (self.datapath(),)
@@ -464,13 +478,27 @@ class InverseController(OvsController):
 			s.bind(socket_fname)
 			s.listen(8)
 			
-			server = StreamServer(s, handle=Handle(ProxySwitch, upstream=self)) # may pass inverse_io_logger_name
+			handle = Handle(ProxySwitch, upstream=self, io_logger_name="root")
+			server = StreamServer(s, handle=handle) # may pass inverse_io_logger_name
 			server.start()
 			
+			self.downstream_handle = handle
 			self.downstream_server = server
 			self.downstream_file = socket_fname
 	
+	def handle_message(self, message):
+		(version, oftype, length, xid) = parse_ofp_header(message)
+		if oftype in (0, 2, 6): # we know those will be used.
+			pass
+		elif oftype == 10 and self.packet_in: # OFPT_PACKET_IN=10
+			self.packet_in(message)
+		else:
+			self.logger.warn("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
+	
 	def close(self,):
+		if self.downstream_handle:
+			self.downstream_handle.close()
+			self.downstream_handle = None
 		if self.downstream_server:
 			self.downstream_server.stop()
 			self.downstream_server = None
@@ -481,7 +509,7 @@ class InverseController(OvsController):
 
 if __name__ == "__main__":
 	logging.basicConfig(level=0)
-	server = StreamServer(("0.0.0.0",6633), handle=Handle(InverseController, io_logger_name="root", io_log_suppress_echo=True, socket_dir="."))
-#	server = StreamServer(("0.0.0.0",6633), handle=Handle(OvsController, io_logger_name="root", ofctl_logger_name="root"))
-#	server = StreamServer(("0.0.0.0",6633), handle=Handle(Controller, io_logger_name="root"))
-	server.serve_forever()
+#	with Handle(OvsController, io_logger_name="root", ofctl_logger_name="root") as handle:
+#	with Handle(Controller, io_logger_name="root") as handle:
+	with Handle(InverseController, io_logger_name="root", io_log_suppress_echo=True, socket_dir=".") as handle:
+		StreamServer(("0.0.0.0",6633), handle=handle).serve_forever()

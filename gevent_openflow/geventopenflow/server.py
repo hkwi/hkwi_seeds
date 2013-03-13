@@ -20,6 +20,69 @@ def ofp_header_only(oftype, version=1, xid=None):
 		xid = hms_xid()
 	return struct.pack("!BBHI", version, oftype, 8, xid)
 
+def openflow_tuple_bare(etherframe):
+	'''
+	returns an openflow v1.0 12 tuple without the first in_port
+	'''
+	(ethernet_dst, ethernet_src, ethernet_type, tci, inner_type) = struct.unpack_from("!6s6sHHH", etherframe)
+	if ethernet_type == 0x8100:
+		vlan_id = tci&0x0FFF
+		vlan_priority = tci>>13
+		ethernet_type = inner_type
+		offset = 4
+	else:
+		vlan_id = None
+		vlan_priority = None
+		offset = 0
+	
+	if ethernet_type < 0x05DC:
+		(llc_dsap, llc_ssap, llc_ctl, snap_oui, snap_type) = struct.unpack_from("!BBB3sH", etherframe, offset=14)
+		if llc_dsap==0xAA and llc_ssap==0xAA and snap_oui=="0x00"*3:
+			ethernet_type = snap_type
+			offset = 8
+	
+	ip_tos = ip_protocol = ip_src = ip_dst = None
+	transport_src_port_or_icmp_type = None
+	transport_dst_port_or_icmp_code = None
+	if ethernet_type == 0x0800: # IP
+		(u1, ip_tos, u2, ip_protocol, u3, ip_src, ip_dst, src_port, dst_port) = struct.unpack_from("!sB7sB2s4s4sHH", etherframe, offset=14+offset)
+		if ip_protocol == 1: # ICMP
+			transport_src_port_or_icmp_type = src_port>>8
+			transport_dst_port_or_icmp_code = src_port&0xFF
+		elif ip_protocol in (6, 17): # TCP, UDP
+			transport_src_port_or_icmp_type = src_port
+			transport_dst_port_or_icmp_code = dst_port
+	elif ethernet_type == 0x0806: # ARP
+		(u1, ip_protocol, u2, ip_src, u3, ip_dst) = struct.unpack_from("!6sH6s4s6s4s", etherframe, offset=14+offset)
+	
+	return [
+		ethernet_src,
+		ethernet_dst,
+		ethernet_type,
+		vlan_id,
+		vlan_priority,
+		ip_src,
+		ip_dst,
+		ip_protocol,
+		ip_tos,
+		transport_src_port_or_icmp_type,
+		transport_dst_port_or_icmp_code
+		]
+
+def openflow_tuple(etherframe):
+	t = openflow_tuple_bare(etherframe)
+	t[0] = ":".join(["%02x" % mac for mac in struct.unpack("!6B",t[0])])
+	t[1] = ":".join(["%02x" % mac for mac in struct.unpack("!6B",t[1])])
+	t[2] = "0x%04x" % t[2]
+	if t[5]: t[5] = "%d.%d.%d.%d" % struct.unpack("BBBB", t[5])
+	if t[6]: t[6] = "%d.%d.%d.%d" % struct.unpack("BBBB", t[6])
+	return t
+
+def openflow_tuple_named(etherframe):
+	o = openflow_tuple(etherframe)
+	fields = ("dl_src", "dl_dst", "dl_type", "dl_vlan", "dl_vlan_pcp", "nw_src", "nw_dst", "nw_proto", "ip_tos", "tp_src", "tp_dst")
+	return zip(fields, o)
+
 def hms_hex_xid():
 	'''Xid looks readable datetime like format when logged as hex.'''
 	now = datetime.datetime.now()
@@ -469,7 +532,7 @@ class InverseController(OvsController):
 	def _handle_message(self, message):
 		super(InverseController, self)._handle_message(message)
 		
-		if self.downstream_server is None and hasattr(socket, "AF_UNIX"):
+		if self.downstream_server is None and hasattr(socket, "AF_UNIX") and self.datapath(wait=False):
 			socket_fname = "dp_%x.sock" % (self.datapath(),)
 			if self.socket_dir:
 				socket_fname = os.path.join(self.socket_dir, socket_fname)

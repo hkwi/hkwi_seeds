@@ -414,6 +414,7 @@ class OvsController(BarrieredController):
 		self.socket_dir = kwargs.get("socket_dir")
 		if kwargs.get("ofctl_logger_name"):
 			self.ofctl_logger = logging.getLogger(kwargs.get("ofctl_logger_name"))
+		self.ofctl_io_logger_name = kwargs.get("ofctl_io_logger_name")
 	
 	def _handle_message(self, message):
 		super(OvsController, self)._handle_message(message)
@@ -442,7 +443,7 @@ class OvsController(BarrieredController):
 			socket_path = "tcp:%s:%d" % s.getsockname()
 		s.listen(1)
 		
-		server = StreamServer(s, handle=Handle(ProxySwitch, upstream=self)) # may pass ofctl_io_logger_name
+		server = StreamServer(s, handle=Handle(ProxySwitch, upstream=self, io_logger_name=self.ofctl_io_logger_name)) # may pass ofctl_io_logger_name
 		server.start()
 		
 		cmd = ["ovs-ofctl",]
@@ -528,6 +529,7 @@ class InverseController(OvsController):
 	def __init__(self, *args, **kwargs):
 		super(InverseController, self).__init__(*args, **kwargs)
 		self.socket_dir = kwargs.get("socket_dir")
+		self.inverse_io_logger_name = kwargs.get("inverse_io_logger_name")
 	
 	def _handle_message(self, message):
 		super(InverseController, self)._handle_message(message)
@@ -541,8 +543,8 @@ class InverseController(OvsController):
 			s.bind(socket_fname)
 			s.listen(8)
 			
-			handle = Handle(ProxySwitch, upstream=self, io_logger_name="root")
-			server = StreamServer(s, handle=handle) # may pass inverse_io_logger_name
+			handle = Handle(ProxySwitch, upstream=self, io_logger_name=self.inverse_io_logger_name)
+			server = StreamServer(s, handle=handle)
 			server.start()
 			
 			self.downstream_handle = handle

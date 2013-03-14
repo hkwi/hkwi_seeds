@@ -220,17 +220,20 @@ class Connection(object):
 				break
 		self.close()
 	
-	def echo_reply(self, message):
-		# Convenient method for ofp echo_reply. Subclass may use this.
+	def on_echo(self, message):
+		# Convenient method to responding to ofp echo_request. Subclass may use this.
 		#
 		# Both controller and switch will send echo reply
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		self.send(struct.pack("!BBHI", version, 3, 8+length, xid)+message)
 	
+	def on_error(self, message):
+		self.logger.error("ofp_error %s", binascii.b2a_hex(message))
+	
 	def _handle_message(self, message):
 		(version, oftype, length, xid) = parse_ofp_header(message)
-		if oftype==2 and self.echo_reply:
-			self.echo_reply(message)
+		if oftype==2 and self.on_echo:
+			self.on_echo(message)
 		self.handle_message(message)
 	
 	def handle_message(self, message):
@@ -339,8 +342,10 @@ class BarrieredController(Controller):
 		if (oftype==19 and version==1) or (oftype==21 and version!=1):
 			assert xid == self.barriers[0].xid, "switch replied to unknown barrier request or barrier is out of order."
 		
-		if oftype==2 and self.echo_reply:
-			self.echo_reply(message)
+		if oftype==1:
+			self.on_error(message)
+		elif oftype==2 and self.on_echo:
+			self.on_echo(message)
 		
 		if oftype == 6: # OFPT_FEATURES_REPLY
 			self.featuresAsyncResult.set(message)
@@ -354,7 +359,7 @@ class BarrieredController(Controller):
 			if self.active_callback is None:
 				callback = self.handle_message
 			callback(message)
-
+	
 	def close(self):
 		if self.featuresAsyncResult and self.featuresAsyncResult.value is None:
 			self.featuresAsyncResult.set_exception(ConnectionException("connection closed."))
@@ -378,7 +383,7 @@ class ProxySwitch(Switch):
 		self.upstream = kwargs["upstream"]
 		self.relay_echo = kwargs.get("relay_echo")
 		if self.relay_echo:
-			self.echo_reply = None # upstream will be respond to echo
+			self.on_echo = None # upstream will be respond to echo
 	
 	def handle_message(self, message):
 		'''

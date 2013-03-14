@@ -70,7 +70,7 @@ class Message(Common):
 	
 	def asjson(self):
 		self._parse_nonheader()
-		ret = dict([(k, getattr(self,k)) for k in dict(self._bare).keys() if not k.startswith("_")])
+		ret = super(Message, self).asjson()
 		if "data" in ret:
 			ret["data"] = binascii.b2a_hex(ret["data"])
 		return ret
@@ -112,7 +112,7 @@ def v1actions(message, offset):
 		offset += a.len
 	return actions
 
-def v1state_readable(value, obj):
+def v1port_state_readable(value, obj):
 	ret = []
 	if value & 1:
 		ret.append("LINK_DOWN")
@@ -121,16 +121,19 @@ def v1state_readable(value, obj):
 
 def v1ports(message, offset):
 	ret = []
+	v1port_features = ("10MB_HD", "10MB_FD", "100MB_HD", "100MB_FD", "1GB_HD", "1GB_FD", "10GB_FD", 
+		"COPPER", "FIBER", "AUTONEG", "PAUSE", "PAUSE_ASYM")
 	while offset<len(message):
 		p = Port()
 		packdef = ("!H6s16sIIIIII", ("port_no", "hw_addr", "name", "config", "state", "curr", "advertised", "supported", "peer"), {
 			"hw_addr": mac,
-			"name": lambda v,o: v.split("\0")[0],
+			"name": lambda v,o: v.partition("\0")[0],
 			"config": lambda v,o: bitlist(v, ("PORT_DOWN", "NO_STP", "NO_RECV", "NO_RECV_STP", "NO_FLOOD", "NO_FWD", "NO_PACKET_IN")),
-			"curr": v1state_readable,
-			"advertised": v1state_readable,
-			"supported": v1state_readable,
-			"peer": v1state_readable
+			"state": v1port_state_readable,
+			"curr": lambda v,o: bitlist(v, v1port_features),
+			"advertised": lambda v,o: bitlist(v, v1port_features),
+			"supported": lambda v,o: bitlist(v, v1port_features),
+			"peer": lambda v,o: bitlist(v, v1port_features)
 			})
 		_bare_and_readable(p, packdef, message, offset)
 		ret.append(p)
@@ -141,7 +144,7 @@ def bitlist(target, idx):
 	return [idx[i] for i in range(len(idx)) if (target>>i)&1]
 
 def hexify(value, obj):
-	return "0x%x" % value
+	return "%#x" % value
 
 def mac(value, obj):
 	return ":".join(["%02x" % mac for mac in struct.unpack("!6B", value)])
@@ -160,7 +163,9 @@ def type_readable(value, obj):
 
 header = ("!BBHI", ("version", "type", "length", "xid"), {"type":type_readable, "xid":hexify})
 
-v1features_reply = ("!QIB3sII", ("datapath_id", "n_buffers", "n_tables", "_pad", "capabilities", "actions"), {"datapath_id":hexify})
+v1features_reply = ("!QIB3sII", ("datapath_id", "n_buffers", "n_tables", "_pad", "capabilities", "actions"), {
+	"datapath_id":lambda v,o: "%016x" % v
+	})
 
 def v1error_code_readable(value, obj):
 	etype = obj.etype
@@ -264,6 +269,4 @@ def ofptuple_named(etherframe):
 	return collections.namedtuple("OfpTuple", fields)(*ofptuple(etherframe))
 
 ####################### 
-v1port_features = ("10MB_HD", "10MB_FD", "100MB_HD", "100MB_FD", "1GB_HD", "1GB_FD", "10GB_FD",
-	"COPPER", "FIBER", "AUTONEG", "PAUSE", "PAUSE_ASYM")
 

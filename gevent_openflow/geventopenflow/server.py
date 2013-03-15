@@ -197,9 +197,9 @@ class Controller(Connection):
 		super(Controller, self).__init__(*args, **kwargs)
 		self.barriered = False
 	
-	def packet_in(self, message):
+	def on_packet(self, message):
 		'''
-		Default packet_in handler for openvswitch use this for heartbeat check.
+		Default on_packet handler for openvswitch use this for heartbeat check.
 		'''
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		(buffer_id, ) = struct.unpack_from("!I", message, offset=8)
@@ -214,8 +214,8 @@ class Controller(Connection):
 	def handle_message(self, message):
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		
-		if oftype == 10 and self.packet_in: # OFPT_PACKET_IN=10
-			self.packet_in(message)
+		if oftype == 10 and self.on_packet: # OFPT_PACKET_IN=10
+			self.on_packet(message)
 
 class Barrier(object):
 	def __init__(self, xid, next_callback=None, this_callback=None):
@@ -363,7 +363,7 @@ class OvsController(BarrieredController):
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		
 		if oftype == 10:
-			self.packet_in(message)
+			self.on_packet(message)
 		elif oftype == 6: # OFPT_FEATURES_REPLY
 			result = self.ofctl("dump-flows")
 			result = self.ofctl("dump-tables")
@@ -470,6 +470,7 @@ class InverseController(OvsController):
 	'''
 	Creates a unix domain socket that accepts controller access (inverse connection direction).
 	'''
+	downstream_handle = None
 	downstream_server = None
 	downstream_file = None
 	def __init__(self, *args, **kwargs):
@@ -501,8 +502,8 @@ class InverseController(OvsController):
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		if oftype in (0, 2, 6): # we know those will be used.
 			pass
-		elif oftype == 10 and self.packet_in: # OFPT_PACKET_IN=10
-			self.packet_in(message)
+		elif oftype == 10 and self.on_packet: # OFPT_PACKET_IN=10
+			self.on_packet(message)
 		else:
 			self.logger.warn("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
 	

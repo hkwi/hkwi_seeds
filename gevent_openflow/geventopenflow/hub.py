@@ -63,8 +63,8 @@ class HubController(InverseController):
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		if oftype in (0, 2, 6): # we know those will be used.
 			pass
-		elif oftype == 10 and self.packet_in: # OFPT_PACKET_IN=10
-			self.packet_in(message)
+		elif oftype == 10 and self.on_packet: # OFPT_PACKET_IN=10
+			self.on_packet(message)
 		else:
 			self.logger.warn("unhandled %s" % self._ofp_common_fields(message), exc_info=True)
 

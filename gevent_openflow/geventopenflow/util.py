@@ -6,17 +6,18 @@ import struct
 class AttrDumper(json.JSONEncoder):
 	def default(self, o):
 		if hasattr(o, "_bare"):
-			return o.asjson()
+			return o._as_dict()
 		
 		return super(AttrDumper,self).default(o)
 
 class Common(object):
-	def __init__(self, version=1):
+	def __init__(self, version=1, raw=False):
 		self._bare = []
 		self._readable = {}
+		self._raw = raw
 		self.version=version
 	
-	def asjson(self):
+	def _as_dict(self):
 		return dict([(k, getattr(self,k)) for k in dict(self._bare).keys() if not k.startswith("_")])
 	
 	def __getattr__(self, name):
@@ -24,7 +25,7 @@ class Common(object):
 			self._parse_nonheader()
 		try:
 			value = dict(self._bare)[name]
-			if name in self._readable:
+			if not self._raw and name in self._readable:
 				return self._readable[name](value, self)
 			return value
 		except Exception as e:
@@ -40,11 +41,12 @@ class Port(Common):
 	pass
 
 class Message(Common):
-	def __init__(self, message):
+	def __init__(self, message, raw=False):
 		self._bare = []
 		self._readable = {}
 		self._message = message
 		self._parse_nonheader_run = False
+		self._raw = raw
 		_bare_and_readable(self, header, message, 0)
 		assert self.version == 1, "not supported yet"
 	
@@ -61,17 +63,17 @@ class Message(Common):
 			_bare_and_readable(self, v1packet_in, self._message, 8)
 			self._bare.append(("data", self._message[18:]))
 		elif self.type == "PACKET_OUT":
-			self.__dict__.update(_zip_upto(v1packet_out, self._message, 8))
+			_bare_and_readable(self, v1packet_out, self._message, 8)
 			if self.buffer_id == 0xffffffff: # -1
 				self._bare.append(("data", self._message[16:]))
 			else:
 				self._bare.append(("actions", v1actions(self._message, 16)))
 		self._parse_nonheader_run = True
 	
-	def asjson(self):
+	def _as_dict(self):
 		self._parse_nonheader()
-		ret = super(Message, self).asjson()
-		if "data" in ret:
+		ret = super(Message, self)._as_dict()
+		if not self._raw and "data" in ret:
 			ret["data"] = binascii.b2a_hex(ret["data"])
 		return ret
 
@@ -158,7 +160,7 @@ def type_readable(value, obj):
 		"PACKET_IN", "FLOW_REMOVED", "PORT_STATUS", 
 		"PACKET_OUT", "FLOW_MOD", "PORT_MOD", 
 		"STATS_REQUEST", "STATS_REPLY",
-		"BARRIER_REQUEST", "BARRIER_REPLY"
+		"BARRIER_REQUEST", "BARRIER_REPLY",
 		"QUEUE_GET_CONFIG_REQUEST", "QUEUE_GET_CONFIG_REPLY")[value]
 
 header = ("!BBHI", ("version", "type", "length", "xid"), {"type":type_readable, "xid":hexify})
@@ -201,7 +203,9 @@ v1packet_in = ("!IHHB", ("buffer_id", "total_len", "in_port", "reason"), {
 	"reason":lambda v,o:("NO_MATCH", "ACTION")[v]
 	})
 
-v1packet_out = ("!IHH", ("buffer_id", "in_port", "actions_len"))
+v1packet_out = ("!IHH", ("buffer_id", "in_port", "actions_len"), {
+	"in_port":v1port_readable
+	})
 
 
 ####################### 
@@ -255,18 +259,18 @@ def ofptuple_bare(etherframe):
 		transport_dst_port_or_icmp_code
 		)
 
-def ofptuple(etherframe):
+def ofptuple_readable(etherframe):
 	t = list(ofptuple_bare(etherframe))
-	t[0] = ":".join(["%02x" % mac for mac in struct.unpack("!6B",t[0])])
-	t[1] = ":".join(["%02x" % mac for mac in struct.unpack("!6B",t[1])])
+	t[0] = mac(t[0], None)
+	t[1] = mac(t[1], None)
 	t[2] = "0x%04x" % t[2]
 	if t[5]: t[5] = "%d.%d.%d.%d" % struct.unpack("BBBB", t[5])
 	if t[6]: t[6] = "%d.%d.%d.%d" % struct.unpack("BBBB", t[6])
 	return tuple(t)
 
-def ofptuple_named(etherframe):
+def ofptuple(etherframe):
 	fields = ("dl_src", "dl_dst", "dl_type", "dl_vlan", "dl_vlan_pcp", "nw_src", "nw_dst", "nw_proto", "ip_tos", "tp_src", "tp_dst")
-	return collections.namedtuple("OfpTuple", fields)(*ofptuple(etherframe))
+	return collections.namedtuple("OfpTuple", fields)(*ofptuple_readable(etherframe))
 
 ####################### 
 

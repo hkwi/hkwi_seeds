@@ -58,7 +58,7 @@ class Message(Common):
 			self._bare.append(("data", self._message[12:]))
 		elif self.type == "FEATURES_REPLY":
 			_bare_and_readable(self, v1features_reply, self._message, 8)
-			self._bare.append(("ports", v1ports(self._message, 32)))
+			self._bare.append(("ports", v1ports(self._message, 32, self._raw)))
 		elif self.type == "PACKET_IN":
 			_bare_and_readable(self, v1packet_in, self._message, 8)
 			self._bare.append(("data", self._message[18:]))
@@ -67,7 +67,10 @@ class Message(Common):
 			if self.buffer_id == 0xffffffff: # -1
 				self._bare.append(("data", self._message[16:]))
 			else:
-				self._bare.append(("actions", v1actions(self._message, 16)))
+				self._bare.append(("actions", v1actions(self._message, 16, self._raw)))
+		elif self.type == "PORT_STATUS":
+			_bare_and_readable(self, v1port_status, self._message, 8)
+			self._bare.append(("port", v1port(self._message, 16, self._raw)))
 		self._parse_nonheader_run = True
 	
 	def _as_dict(self):
@@ -81,15 +84,16 @@ def _bare_and_readable(obj, packdef, message, offset):
 	obj._bare.extend(zip(packdef[1], struct.unpack_from(packdef[0], message, offset)))
 	obj._readable.update(packdef[2])
 
-def v1actions(message, offset):
+v1action_types = ("OUTPUT", "SET_VLAN_VID", "SET_VLAN_PCP", "STRIP_VLAN", "SET_DL_SRC", "SET_DL_DST", 
+	"SET_NW_SRC", "SET_NW_DST", "SET_NW_TOS", "SET_TP_SRC", "SET_TP_DST", "ENQUEUE") # VENDOR=0xffff
+
+def v1actions(message, offset, raw):
 	actions = []
 	while offset<len(message):
-		a = Action()
+		a = Action(raw=raw)
 		(a.type, a.len) = struct.unpack_from("!HH", message, offset)
 		if a.type != 0xffff: # VENDOR
-			v1action_type = ("OUTPUT", "SET_VLAN_VID", "SET_VLAN_PCP", "STRIP_VLAN", "SET_DL_SRC", "SET_DL_DST", 
-				"SET_NW_SRC", "SET_NW_DST", "SET_NW_TOS", "SET_TP_SRC", "SET_TP_DST", "ENQUEUE") # VENDOR=0xffff
-			sub = v1action_type[a.type]
+			sub = v1action_types[a.type]
 		
 		if sub == "OUTPUT":
 			(a.port, a.max_len) = struct.unpack_from("!HH", message, offset+4)
@@ -121,26 +125,29 @@ def v1port_state_readable(value, obj):
 	ret.append(("STP_LISTEN", "STP_LEARN", "STP_FORWARD", "STP_BLOCK")[(value>>8)&3])
 	return ret
 
-def v1ports(message, offset):
+def v1ports(message, offset, raw):
 	ret = []
-	v1port_features = ("10MB_HD", "10MB_FD", "100MB_HD", "100MB_FD", "1GB_HD", "1GB_FD", "10GB_FD", 
-		"COPPER", "FIBER", "AUTONEG", "PAUSE", "PAUSE_ASYM")
 	while offset<len(message):
-		p = Port()
-		packdef = ("!H6s16sIIIIII", ("port_no", "hw_addr", "name", "config", "state", "curr", "advertised", "supported", "peer"), {
-			"hw_addr": mac,
-			"name": lambda v,o: v.partition("\0")[0],
-			"config": lambda v,o: bitlist(v, ("PORT_DOWN", "NO_STP", "NO_RECV", "NO_RECV_STP", "NO_FLOOD", "NO_FWD", "NO_PACKET_IN")),
-			"state": v1port_state_readable,
-			"curr": lambda v,o: bitlist(v, v1port_features),
-			"advertised": lambda v,o: bitlist(v, v1port_features),
-			"supported": lambda v,o: bitlist(v, v1port_features),
-			"peer": lambda v,o: bitlist(v, v1port_features)
-			})
-		_bare_and_readable(p, packdef, message, offset)
-		ret.append(p)
+		ret.append(v1port(message, offset, raw))
 		offset += 48
 	return ret
+
+def v1port(message, offset, raw):
+	p = Port(raw=raw)
+	v1port_features = ("10MB_HD", "10MB_FD", "100MB_HD", "100MB_FD", "1GB_HD", "1GB_FD", "10GB_FD", 
+		"COPPER", "FIBER", "AUTONEG", "PAUSE", "PAUSE_ASYM")
+	packdef = ("!H6s16sIIIIII", ("port_no", "hw_addr", "name", "config", "state", "curr", "advertised", "supported", "peer"), {
+		"hw_addr": mac,
+		"name": lambda v,o: v.partition("\0")[0],
+		"config": lambda v,o: bitlist(v, ("PORT_DOWN", "NO_STP", "NO_RECV", "NO_RECV_STP", "NO_FLOOD", "NO_FWD", "NO_PACKET_IN")),
+		"state": v1port_state_readable,
+		"curr": lambda v,o: bitlist(v, v1port_features),
+		"advertised": lambda v,o: bitlist(v, v1port_features),
+		"supported": lambda v,o: bitlist(v, v1port_features),
+		"peer": lambda v,o: bitlist(v, v1port_features)
+		})
+	_bare_and_readable(p, packdef, message, offset)
+	return p
 
 def bitlist(target, idx):
 	return [idx[i] for i in range(len(idx)) if (target>>i)&1]
@@ -166,7 +173,9 @@ def type_readable(value, obj):
 header = ("!BBHI", ("version", "type", "length", "xid"), {"type":type_readable, "xid":hexify})
 
 v1features_reply = ("!QIB3sII", ("datapath_id", "n_buffers", "n_tables", "_pad", "capabilities", "actions"), {
-	"datapath_id":lambda v,o: "%016x" % v
+	"datapath_id":lambda v,o: "%016x" % v,
+	"capabilities":lambda v,o: bitlist(v, ("FLOW_STATS", "TABLE_STATS", "PORT_STATS", "STP", "RESERVED", "IP_REASM", "QUEUE_STATS", "ARP_MATCH_IP")),
+	"actions":lambda v,o: bitlist(v, v1action_types)
 	})
 
 def v1error_code_readable(value, obj):
@@ -207,6 +216,9 @@ v1packet_out = ("!IHH", ("buffer_id", "in_port", "actions_len"), {
 	"in_port":v1port_readable
 	})
 
+v1port_status = ("!B", ("reason",), {
+	"reason":lambda v,o:("ADD", "DELETE", "MODIFY")[v]
+	})
 
 ####################### 
 

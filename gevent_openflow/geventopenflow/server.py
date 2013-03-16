@@ -228,17 +228,16 @@ class Barrier(object):
 			self.this_callback(message)
 
 class BarrieredController(Controller):
-	featuresAsyncResult = None
 	def __init__(self, *args, **kwargs):
 		super(BarrieredController, self).__init__(*args, **kwargs)
 		self.callback = self.handle_message # default callback
 		self.barriers = []
 		self.last_callback = None
 		self.active_callback = None # Active responder callback. This may be None, _handle_message will take care
+		self.featuresAsyncResult = AsyncResult()
 	
 	def datapath(self, wait=True):
-		if self.featuresAsyncResult is None:
-			self.featuresAsyncResult = AsyncResult()
+		if self.featuresAsyncResult.value is None:
 			self.send_header_only(5) # OFPT_FEATURES_REQUEST
 		
 		if wait or self.featuresAsyncResult.value:

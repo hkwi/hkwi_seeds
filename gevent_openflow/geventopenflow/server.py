@@ -75,6 +75,7 @@ class Handle(object):
 class Connection(object):
 	io_logger = None
 	io_log_suppress_echo = None
+	io_log_suppress_barrier = None
 	def __init__(self, socket, address, **kwargs):
 		self.socket = socket
 		self.address = address
@@ -84,6 +85,7 @@ class Connection(object):
 		if io_logger_name:
 			self.io_logger = logging.getLogger(io_logger_name)
 		self.io_log_suppress_echo = kwargs.get("io_log_suppress_echo")
+		self.io_log_suppress_barrier = kwargs.get("io_log_suppress_barrier")
 		
 		self.sendq = Queue()
 	
@@ -136,7 +138,7 @@ class Connection(object):
 					break
 				assert len(message) == OFP_HEADER_LEN, "Read error in openflow message header."
 				
-				(v,oftype,message_len,x) = parse_ofp_header(bytes(message))
+				(version,oftype,message_len,x) = parse_ofp_header(bytes(message))
 				while len(message) < message_len and not self.closed:
 					ext = self.socket.recv(message_len-len(message))
 					if len(ext) == 0:
@@ -147,6 +149,8 @@ class Connection(object):
 				message = bytes(message)
 				if self.io_logger:
 					if oftype in (2,3) and self.io_log_suppress_echo:
+						pass
+					elif ((oftype in (18,19) and version==1) or (oftype in (20,21) and version!=1)) and self.io_log_suppress_barrier:
 						pass
 					else:
 						self._log_io("recv", message)
@@ -182,6 +186,8 @@ class Connection(object):
 				if self.io_logger:
 					(version, oftype, length, xid) = parse_ofp_header(message)
 					if oftype in (2,3) and self.io_log_suppress_echo:
+						pass
+					elif ((oftype in (18,19) and version==1) or (oftype in (20,21) and version!=1)) and self.io_log_suppress_barrier:
 						pass
 					else:
 						self._log_io("send", message)
@@ -233,19 +239,21 @@ class BarrieredController(Controller):
 		self.barriers = []
 		self.last_callback = None
 		self.active_callback = None # Active responder callback. This may be None, _handle_message will take care
-		self.featuresAsyncResult = AsyncResult()
+		self.datapathAsyncResult = AsyncResult()
+		self._feature_req_sent = False
 	
 	def datapath(self, wait=True):
-		if self.featuresAsyncResult.value is None:
+		if self.datapathAsyncResult.value is None and not self._feature_req_sent:
 			self.send_header_only(5) # OFPT_FEATURES_REQUEST
-		
-		if wait or self.featuresAsyncResult.value:
-			(datapath,) = struct.unpack_from("!Q", self.featuresAsyncResult.get(), offset=8)
-			return datapath
-		return None
+		if wait:
+			return self.datapathAsyncResult.get()
+		else:
+			return self.datapathAsyncResult.value
 	
 	def send(self, message, callback=None):
 		(version, oftype, length, xid) = parse_ofp_header(message)
+		if oftype==5:
+			self._feature_req_sent = True
 		if (oftype==18 and version==1) or (oftype==20 and version!=1): # OFPT_BARRIER_REQUEST
 			self.barriers.append(Barrier(xid, this_callback=callback))
 		else:
@@ -283,7 +291,8 @@ class BarrieredController(Controller):
 			self.on_echo(message)
 		
 		if oftype == 6: # OFPT_FEATURES_REPLY
-			self.featuresAsyncResult.set(message)
+			(datapath,) = struct.unpack_from("!Q", message, offset=8)
+			self.datapathAsyncResult.set(datapath)
 		
 		if len(self.barriers) and xid == self.barriers[0].xid:
 			barrier = self.barriers.pop(0)
@@ -297,8 +306,8 @@ class BarrieredController(Controller):
 			callback(message)
 	
 	def close(self):
-		if self.featuresAsyncResult and self.featuresAsyncResult.value is None:
-			self.featuresAsyncResult.set_exception(ConnectionException("connection closed."))
+		if self.datapathAsyncResult and self.datapathAsyncResult.value is None:
+			self.datapathAsyncResult.set_exception(ConnectionException("connection closed."))
 		super(BarrieredController, self).close()
 
 class Switch(Connection):
@@ -479,7 +488,6 @@ class InverseController(OvsController):
 	
 	def _handle_message(self, message):
 		super(InverseController, self)._handle_message(message)
-		
 		if self.downstream_server is None and hasattr(socket, "AF_UNIX") and self.datapath(wait=False):
 			socket_fname = "dp_%x.sock" % (self.datapath(),)
 			if self.socket_dir:

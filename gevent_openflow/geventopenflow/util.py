@@ -31,6 +31,9 @@ class Common(object):
 		except Exception as e:
 			raise AttributeError("no %s attribute: %s" % (name, e))
 	
+	def _parse_nonheader(self,):
+		pass
+	
 	def __repr__(self):
 		return json.dumps(self, cls=AttrDumper, separators=(", ",":"))
 
@@ -87,33 +90,46 @@ def _bare_and_readable(obj, packdef, message, offset):
 v1action_types = ("OUTPUT", "SET_VLAN_VID", "SET_VLAN_PCP", "STRIP_VLAN", "SET_DL_SRC", "SET_DL_DST", 
 	"SET_NW_SRC", "SET_NW_DST", "SET_NW_TOS", "SET_TP_SRC", "SET_TP_DST", "ENQUEUE") # VENDOR=0xffff
 
+def v1action_type_readable(value, obj):
+	global v1action_types
+	try:
+		return v1action_types[value]
+	except:
+		return hex(value)
+
 def v1actions(message, offset, raw):
 	actions = []
 	while offset<len(message):
 		a = Action(raw=raw)
-		(a.type, a.len) = struct.unpack_from("!HH", message, offset)
-		if a.type != 0xffff: # VENDOR
-			sub = v1action_types[a.type]
+		a._readable["type"] = v1action_type_readable
 		
+		atypelen = struct.unpack_from("!HH", message, offset)
+		a._bare.extend(zip(("type", "len"), atypelen))
+		
+		sub = v1action_type_readable(atypelen[0], None)
 		if sub == "OUTPUT":
-			(a.port, a.max_len) = struct.unpack_from("!HH", message, offset+4)
+			ext = zip(("port", "max_len"), struct.unpack_from("!HH", message, offset+4))
+			a._readable["port"] = v1port_readable
 		elif sub == "ENQUEUE":
-			(a.port, u1, a.queue_id) = struct.unpack_from("!H6sI", message, offset+4)
+			ext = zip(("port", "_", "queue_id"), struct.unpack_from("!H6sI", message, offset+4))
+			a._readable["port"] = v1port_readable
 		elif sub == "SET_VLAN_VID":
-			(a.vlan_vid,) = struct.unpack_from("!H", message, offset+4)
+			ext = zip(("vlan_vid",), struct.unpack_from("!H", message, offset+4))
 		elif sub == "SET_VLAN_PCP":
-			(a.vlan_pcp,) = struct.unpack_from("!B", message, offset+4)
+			ext = zip(("vlan_pcp",), struct.unpack_from("!B", message, offset+4))
 		elif sub in ("SET_DL_SRC", "SET_DL_DST"):
-			(a.dl_addr,) = struct.unpack_from("!6s", message, offset+4)
+			ext = zip(("dl_addr",), struct.unpack_from("!6s", message, offset+4))
 		elif sub in ("SET_NW_SRC", "SET_NW_DST"):
-			(a.nw_addr,) = struct.unpack_from("!I", message, offset+4)
+			ext = zip(("nw_addr",), struct.unpack_from("!I", message, offset+4))
 		elif sub == "SET_TW_TOS":
-			(a.nw_tos,) = struct.unpack_from("!B", message, offset+4)
+			ext = zip(("nw_tos",), struct.unpack_from("!B", message, offset+4))
 		elif sub in ("SET_TP_SRC", "SET_TP_DST"):
-			(a.tp_port,) = struct.unpack_from("!H", message, offset+4)
+			ext = zip(("tp_port",), struct.unpack_from("!H", message, offset+4))
 		else: # VENDOR
 			assert a.type == 0xffff, "unknown action type %d" % a.type
-			(a.vendor,) = struct.unpack_from("!I", message, offset+4)
+			ext = zip(("vendor",), struct.unpack_from("!I", message, offset+4))
+		
+		a._bare.extend(ext)
 		actions.append(a)
 		offset += a.len
 	return actions

@@ -97,7 +97,6 @@ class Connection(object):
 				self.socket.close()
 			except:
 				self.logger.error("socket close error", exc_info=True)
-		self.sendq = None
 	
 	def _log_io(self, direction, message):
 		zdata = self._ofp_common_fields(message)
@@ -499,7 +498,7 @@ class InverseController(OvsController):
 	
 	def handle_message(self, message):
 		(version, oftype, length, xid) = parse_ofp_header(message)
-		if oftype in (0, 2, 6): # we know those will be used.
+		if oftype in (0, 2, 3, 6): # we know those will be used.
 			pass
 		elif oftype == 10 and self.on_packet: # OFPT_PACKET_IN=10
 			self.on_packet(message)
@@ -518,9 +517,19 @@ class InverseController(OvsController):
 			self.downstream_file = None
 		super(InverseController, self).close()
 
+class HeartbeatController(InverseController):
+	def send_hello(self):
+		super(HeartbeatController, self).send_hello()
+		gevent.spawn(self.heartbeat)
+
+	def heartbeat(self):
+		while not self.closed:
+			self.send_header_only(2)
+			gevent.sleep(14)
+
 if __name__ == "__main__":
 	logging.basicConfig(level=0)
 #	with Handle(OvsController, io_logger_name="root", ofctl_logger_name="root") as handle:
 #	with Handle(Controller, io_logger_name="root") as handle:
-	with Handle(InverseController, io_logger_name="root", io_log_suppress_echo=True, socket_dir=".") as handle:
+	with Handle(HeartbeatController, io_logger_name="root", io_log_suppress_echo=True, socket_dir=".") as handle:
 		StreamServer(("0.0.0.0",6633), handle=handle).serve_forever()

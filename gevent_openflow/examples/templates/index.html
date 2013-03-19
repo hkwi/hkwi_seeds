@@ -1,0 +1,37 @@
+<html><body>
+<script src="http://code.jquery.com/jquery-1.9.1.min.js"></script>
+<script type="text/javascript">
+function wsbase(){
+    var ws = new WebSocket("ws://{{server}}/switch");
+    ws.onerror = function(e){
+        console.log(e);
+    }
+    ws.onmessage = function(event){
+        var ev = $.parseJSON(event.data);
+        if(ev.action=="connect"){
+            var obj = $("#cont");
+            obj.html(obj.html()+
+                '<div id="b' + ev.datapath +'"><h3>datapath=' + ev.datapath + ' events</h3><div id="id' 
+                + ev.datapath + '"><\div>');
+            wsgen(ev.datapath);
+        }else if(ev.action=="disconnect"){
+            $("#b"+ev.datapath).remove();
+        }
+    }
+}
+function wsgen(dpid){
+    var ws = new WebSocket("ws://{{server}}/switch/"+dpid);
+    ws.onerror = function(e){
+        console.log(e);
+    }
+    ws.onmessage = function(event){
+        var obj = $("#id"+dpid);
+        obj.html(obj.html()+"<div>"+event.data+"</div>");
+    }
+}
+</script>
+<div id="cont"></div>
+<script type="text/javascript">
+wsbase();
+</script>
+</body></html>

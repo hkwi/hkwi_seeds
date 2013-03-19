@@ -288,7 +288,8 @@ class BarrieredController(Controller):
 		if len(self.barriers) and xid == self.barriers[0].xid:
 			barrier = self.barriers.pop(0)
 			barrier(message)
-			self.active_callback = barrier.next_callback
+			if barrier.next_callback:
+				self.active_callback = barrier.next_callback
 		else:
 			callback = self.active_callback
 			if self.active_callback is None:
@@ -531,5 +532,5 @@ if __name__ == "__main__":
 	logging.basicConfig(level=0)
 #	with Handle(OvsController, io_logger_name="root", ofctl_logger_name="root") as handle:
 #	with Handle(Controller, io_logger_name="root") as handle:
-	with Handle(HeartbeatController, io_logger_name="root", io_log_suppress_echo=True, socket_dir=".") as handle:
+	with Handle(HeartbeatController, io_logger_name="root", io_log_suppress_echo=False, socket_dir=".") as handle:
 		StreamServer(("0.0.0.0",6633), handle=handle).serve_forever()

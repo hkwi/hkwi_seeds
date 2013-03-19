@@ -39,8 +39,9 @@ class WsController(HeartbeatController):
 	
 	def close(self):
 		super(WsController, self).close()
-		self.ofcons.remove(self)
-		spawn(self.close_ws)
+		if self in self.ofcons:
+			self.ofcons.remove(self)
+			spawn(self.close_ws)
 	
 	def close_ws(self):
 		msg = json.dumps({"datapath":"%016x" % self.datapath(), "action":"disconnect"})

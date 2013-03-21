@@ -1,201 +1,396 @@
 import binascii
 import collections
+import datetime
 import json
 import struct
 
-class AttrDumper(json.JSONEncoder):
-	def default(self, o):
-		if hasattr(o, "_bare"):
-			return o._as_dict()
-		
-		return super(AttrDumper,self).default(o)
+RAW_VIEW = 0
+PARSED_VIEW = 1
+DUMP_VIEW = 2
 
-class Common(object):
-	def __init__(self, version=1, raw=False):
-		self._bare = []
-		self._readable = {}
-		self._raw = raw
-		self.version=version
+class View(object):
+	def __init__(self):
+		self.level = 1
+		self._saved_level = None
 	
-	def _as_dict(self):
-		return dict([(k, getattr(self,k)) for k in dict(self._bare).keys() if not k.startswith("_")])
+	@property
+	def raw(self): # 0
+		return True if self.level==0 else False
+	
+	@property
+	def parsed(self): # 1,2
+		return True if self.level in (1,2) else False
+	
+	@property
+	def dump(self): # 2
+		return True if self.level>1 else False
+	
+	def show(self, level):
+		return Show(self, level)
+
+class Show:
+	def __init__(self, view, level):
+		self.view = view
+		self.level = level
+		self.saved_level = view.level
+	
+	def __enter__(self):
+		self.view.level = self.level
+	
+	def __exit__(self, exc_type, exc_value, traceback):
+		self.view.level = self.saved_level
+
+class Common(dict):
+	_tail = None
+	def __init__(self, **kwargs):
+		self._view = View()
+		self._packs = "!"
+		self._keys = []
+		self._tail = None
+		self._readable = {}
+		self._version = 1
+# 		if isinstance(message, Common):
+# 			for attr in ("_binary", "_view", "_keys", "_readable", "_version", "_parse_body_run"):
+# 				setattr(self, attr, getattr(message, attr))
+		for key in ("version", "view"):
+			if key in kwargs:
+				setattr(self, "_"+key, kwargs[key])
+	
+	def _append_packdef(self, packs, keys, readable):
+		self._packs += packs
+		self._keys += keys
+		self._readable.update(readable)
+	
+	def _append_tail(self, key, value, readable={}):
+		assert self._tail is None
+		self._tail = key
+		self[key] = value
+		self._readable.update(readable)
+	
+	def _unpack(self, message, offset=0):
+		for key, value in zip(self._keys, struct.unpack_from(self._packs, message, offset=offset)):
+			super(Common, self).__setitem__(key, value)
 	
 	def __getattr__(self, name):
-		if name not in dict(self._bare):
-			self._parse_nonheader()
 		try:
-			value = dict(self._bare)[name]
-			if not self._raw and name in self._readable:
-				return self._readable[name](value, self)
-			return value
-		except Exception as e:
-			raise AttributeError("no %s attribute: %s" % (name, e))
+			return self[name]
+		except KeyError:
+			raise AttributeError(name)
 	
-	def _parse_nonheader(self,):
-		pass
+	def __setattr__(self, name, value):
+		if name.startswith("_"):
+			super(Common, self).__setattr__(name, value)
+		elif name == "data" and self._view.dump:
+			self[name] = binascii.a2b_hex(value)
+		elif name == self._tail or name in self._keys:
+			if name in self._readable and self._view.parsed:
+				self[name] = self._readable[name](value, self, True)
+			else:
+				self[name] = value
+		else:
+			super(Common, self).__setattr__(name, value)
+	
+	def __getitem__(self, name):
+		if name.startswith("_"):
+			raise KeyError(name)
+		
+		value = super(Common, self).__getitem__(name)
+		
+		if self._view.raw:
+			return value
+		if name == "data" and self._view.dump:
+			return binascii.b2a_hex(value)
+		if name in self._readable and self._view.parsed:
+			return self._readable[name](value, self, False)
+		return value
+	
+	def __iter__(self):
+		visible_keys = [key for key in self._keys if not key.startswith("_")]
+		if self._tail:
+			visible_keys.append(self._tail)
+		return iter(visible_keys)
+	
+	def serialize(self):
+		with self.show(RAW_VIEW):
+			return struct.pack(self._packs, *["" if k.startswith("_") else self[k] for k in self._keys])
+	
+	def show(self, mode):
+		return Show(self._view, mode)
 	
 	def __repr__(self):
-		return json.dumps(self, cls=AttrDumper, separators=(", ",":"))
-
-class Action(Common):
-	pass
-
-class Port(Common):
-	pass
+		with self.show(DUMP_VIEW):
+			return json.dumps(self)
 
 class Message(Common):
-	def __init__(self, message, raw=False):
-		self._bare = []
-		self._readable = {}
-		self._message = message
-		self._parse_nonheader_run = False
-		self._raw = raw
-		_bare_and_readable(self, header, message, 0)
-		assert self.version == 1, "not supported yet"
-	
-	def _parse_nonheader(self):
-		if self._parse_nonheader_run: return
+	def __init__(self, message=None, **kwargs):
+		super(Message, self).__init__(**kwargs)
 		
-		if self.type == "ERROR":
-			_bare_and_readable(self, v1error, self._message, 8)
-			self._bare.append(("data", self._message[12:]))
-		elif self.type == "FEATURES_REPLY":
-			_bare_and_readable(self, v1features_reply, self._message, 8)
-			self._bare.append(("ports", v1ports(self._message, 32, self._raw)))
-		elif self.type == "PACKET_IN":
-			_bare_and_readable(self, v1packet_in, self._message, 8)
-			self._bare.append(("data", self._message[18:]))
-		elif self.type == "PACKET_OUT":
-			_bare_and_readable(self, v1packet_out, self._message, 8)
-			if self.buffer_id == 0xffffffff: # -1
-				self._bare.append(("data", self._message[16:]))
-			else:
-				self._bare.append(("actions", v1actions(self._message, 16, self._raw)))
+		self._append_packdef(*header)
+		
+		if message:
+			self._unpack(message, offset=kwargs.get("offset", 0))
+		elif "type" in kwargs:
+			typeval = v1header_types.index(kwargs["type"].upper())
+			if typeval != -1:
+				self["type"] = typeval
+		
+		with self._view.show(PARSED_VIEW):
+			oftype = self.type
+		
+		packsize = struct.calcsize(self._packs)
+		if oftype == "ERROR":
+			self._append_packdef(*v1error)
+		elif oftype == "FEATURES_REPLY":
+			self._append_packdef(*v1features_reply)
+		elif oftype == "PACKET_IN":
+			self._append_packdef(*v1packet_in)
+		elif oftype == "PACKET_OUT":
+			self._append_packdef(*v1packet_out)
 		elif self.type == "PORT_STATUS":
-			_bare_and_readable(self, v1port_status, self._message, 8)
-			self._bare.append(("port", v1port(self._message, 16, self._raw)))
-		self._parse_nonheader_run = True
+			self._append_packdef(*v1port_status)
+		
+		if message:
+			if packsize != struct.calcsize(self._packs):
+				self._unpack(message, offset=kwargs.get("offset", 0))
+			self._message_tail(message, kwargs.get("offset", 0))
+		else:
+			for key in self._keys:
+				if not key.startswith("_") and key in kwargs:
+					setattr(self, key, kwargs[key])
 	
-	def _as_dict(self):
-		self._parse_nonheader()
-		ret = super(Message, self)._as_dict()
-		if not self._raw and "data" in ret:
-			ret["data"] = binascii.b2a_hex(ret["data"])
-		return ret
+	def _message_tail(self, message, offset):
+		with self._view.show(PARSED_VIEW):
+			oftype = self.type
+		
+		if oftype == "ERROR":
+			assert struct.calcsize(self._packs) == 12
+			self._append_tail("data", message[offset+12:])
+		elif oftype == "FEATURES_REPLY":
+			assert struct.calcsize(self._packs) == 32, "%s" % self._packs
+			offset_in = offset+ 32
+			ports = []
+			while offset_in<len(message):
+				ports.append(Port(message, offset=offset_in, view=self._view))
+				offset_in += 48
+			self._append_tail("ports", ports)
+		elif oftype == "PACKET_IN":
+			assert struct.calcsize(self._packs) == 18
+			self._append_tail("data", message[offset+18:])
+		elif oftype == "PACKET_OUT":
+			assert struct.calcsize(self._packs) == 16
+			if self.buffer_id == 0xffffffff: # -1
+				self._append_tail("data", message[offset+16:])
+			else:
+				offset_in = offset + 16
+				actions = []
+				while offset_in<len(message):
+					action = Action(message, offset=offset_in, view=self._view)
+					actions.append(action)
+					offset_in += action.len
+				self._append_tail("actions", actions)
+		elif self.type == "PORT_STATUS":
+			assert struct.calcsize(self._packs) == 16
+			self._append_tail("port", Port(message, offset=offset+16, view=self._view))
 
-def _bare_and_readable(obj, packdef, message, offset):
-	obj._bare.extend(zip(packdef[1], struct.unpack_from(packdef[0], message, offset)))
-	obj._readable.update(packdef[2])
+	def serialize(self):
+		with self._view.show(PARSED_VIEW):
+			oftype = self.type
+		
+		tail = ""
+		if oftype == "PACKET_OUT":
+			if "data" in self._keys:
+				self.buffer_id = 0xffffffff
+				with self.show(RAW_VIEW):
+					tail = self.data
+			else:
+				with self.show(RAW_VIEW):
+					tail = "".join([a.serialize() for a in self.actions])
+				self.actions_len = len(tail)
+				self.length = struct.calcsize(self._packs) + len(tail)
+		
+		if "version" not in self:
+			self.version = 1
+		
+		self.length = struct.calcsize(self._packs)+len(tail)
+		return super(Message,self).serialize()+tail
 
 v1action_types = ("OUTPUT", "SET_VLAN_VID", "SET_VLAN_PCP", "STRIP_VLAN", "SET_DL_SRC", "SET_DL_DST", 
 	"SET_NW_SRC", "SET_NW_DST", "SET_NW_TOS", "SET_TP_SRC", "SET_TP_DST", "ENQUEUE") # VENDOR=0xffff
 
-def v1action_type_readable(value, obj):
-	global v1action_types
-	try:
+def v1action_type_readable(value, obj, inverse=False):
+	if inverse:
+		if value == "VENDOR":
+			return 0xffff
+		return v1action_types.index(value)
+	else:
+		if value == 0xffff:
+			return "VENDOR"
 		return v1action_types[value]
-	except:
-		return hex(value)
 
-def v1actions(message, offset, raw):
-	actions = []
-	while offset<len(message):
-		a = Action(raw=raw)
-		a._readable["type"] = v1action_type_readable
+class Action(Common):
+	def __init__(self, message=None, **kwargs):
+		super(Action, self).__init__(**kwargs)
 		
-		atypelen = struct.unpack_from("!HH", message, offset)
-		a._bare.extend(zip(("type", "len"), atypelen))
+		self._append_packdef("HH", ("type", "len"), {"type":v1action_type_readable})
 		
-		sub = v1action_type_readable(atypelen[0], None)
-		if sub == "OUTPUT":
-			ext = zip(("port", "max_len"), struct.unpack_from("!HH", message, offset+4))
-			a._readable["port"] = v1port_readable
-		elif sub == "ENQUEUE":
-			ext = zip(("port", "_", "queue_id"), struct.unpack_from("!H6sI", message, offset+4))
-			a._readable["port"] = v1port_readable
-		elif sub == "SET_VLAN_VID":
-			ext = zip(("vlan_vid",), struct.unpack_from("!H", message, offset+4))
-		elif sub == "SET_VLAN_PCP":
-			ext = zip(("vlan_pcp",), struct.unpack_from("!B", message, offset+4))
-		elif sub in ("SET_DL_SRC", "SET_DL_DST"):
-			ext = zip(("dl_addr",), struct.unpack_from("!6s", message, offset+4))
-		elif sub in ("SET_NW_SRC", "SET_NW_DST"):
-			ext = zip(("nw_addr",), struct.unpack_from("!I", message, offset+4))
-		elif sub == "SET_TW_TOS":
-			ext = zip(("nw_tos",), struct.unpack_from("!B", message, offset+4))
-		elif sub in ("SET_TP_SRC", "SET_TP_DST"):
-			ext = zip(("tp_port",), struct.unpack_from("!H", message, offset+4))
-		else: # VENDOR
-			assert a.type == 0xffff, "unknown action type %d" % a.type
-			ext = zip(("vendor",), struct.unpack_from("!I", message, offset+4))
+		if message:
+			self._unpack(message, offset=kwargs.get("offset", 0))
+		elif "type" in kwargs:
+			type_upper = kwargs["type"].upper()
+			typeval = v1action_types.index(type_upper)
+			if typeval != -1:
+				self["type"] = typeval
+			elif type_upper == "VENDOR":
+				self["type"] = 0xffff
 		
-		a._bare.extend(ext)
-		actions.append(a)
-		offset += a.len
-	return actions
+		with self._view.show(PARSED_VIEW):
+			type = self.type
+		
+		pakdef = None
+		if type == "OUTPUT":
+			packdef = ("HH", ("port", "max_len"), {"port":v1port_readable})
+		elif type == "ENQUEUE":
+			packdef = ("H6sI", ("port", "_", "queue_id"), {"port":v1port_readable})
+		elif type == "SET_VLAN_VID":
+			packdef = ("H", ("vlan_vid",), {})
+		elif type == "SET_VLAN_PCP":
+			packdef = ("B", ("vlan_pcp",), {})
+		elif type in ("SET_DL_SRC", "SET_DL_DST"):
+			packdef = ("6s", ("dl_addr",), {})
+		elif type in ("SET_NW_SRC", "SET_NW_DST"):
+			packdef = ("I", ("nw_addr",), {})
+		elif type == "SET_TW_TOS":
+			packdef = ("B", ("nw_tos",), {})
+		elif type in ("SET_TP_SRC", "SET_TP_DST"):
+			packdef = ("H", ("tp_port",), {})
+		elif type == "VENDOR":
+			packdef = ("I", ("vendor",), {})
+		
+		if packdef:
+			self._append_packdef(*packdef)
+		
+		if message:
+			self._unpack(message, offset=kwargs.get("offset", 0))
+		else:
+			for key in self._keys:
+				if not key.startswith("_") and key in kwargs:
+					setattr(self, key, kwargs[key])
+	
+	def serialize(self):
+		self.len = struct.calcsize(self._packs)
+		return super(Action, self).serialize()
 
-def v1port_state_readable(value, obj):
-	ret = []
-	if value & 1:
-		ret.append("LINK_DOWN")
-	ret.append(("STP_LISTEN", "STP_LEARN", "STP_FORWARD", "STP_BLOCK")[(value>>8)&3])
+class Port(Common):
+	def __init__(self, message=None, **kwargs):
+		super(Port, self).__init__(**kwargs)
+		
+		v1port_features = ("10MB_HD", "10MB_FD", "100MB_HD", "100MB_FD", "1GB_HD", "1GB_FD", "10GB_FD", 
+			"COPPER", "FIBER", "AUTONEG", "PAUSE", "PAUSE_ASYM")
+		
+		self._append_packdef("H6s16sIIIIII", ("port_no", "hw_addr", "name", "config", "state", "curr", "advertised", "supported", "peer"), {
+			"hw_addr": mac,
+			"name": lambda v,o,i: v.partition("\0")[0],
+			"config": bit_readable("PORT_DOWN", "NO_STP", "NO_RECV", "NO_RECV_STP", "NO_FLOOD", "NO_FWD", "NO_PACKET_IN"),
+			"state": v1port_state_readable,
+			"curr": bit_readable(*v1port_features),
+			"advertised": bit_readable(*v1port_features),
+			"supported": bit_readable(*v1port_features),
+			"peer": bit_readable(*v1port_features)
+			})
+		
+		if message:
+			self._unpack(message, offset=kwargs.get("offset", 0))
+		else:
+			for key in self._keys:
+				if not key.startswith("_") and key in kwargs:
+					setattr(self, key, kwargs[key])
+
+def v1port_state_readable(value, obj, inverse=False):
+	state_index = ("STP_LISTEN", "STP_LEARN", "STP_FORWARD", "STP_BLOCK")
+	if inverse:
+		ret = 0
+		if "LINK_DOWN" in value:
+			ret = 1
+		for s in state_index:
+			if s in value:
+				ret += (state_index.index(s)<<8)
+	else:
+		ret = []
+		if value & 1:
+			ret.append("LINK_DOWN")
+		ret.append(state_index[(value>>8)&3])
 	return ret
 
-def v1ports(message, offset, raw):
-	ret = []
-	while offset<len(message):
-		ret.append(v1port(message, offset, raw))
-		offset += 48
-	return ret
+class enum_readable:
+	def __init__(self, *idx):
+		self.idx = idx
+	
+	def __call__(self, target, obj, inverse=False):
+		if inverse:
+			i = self.idx.index(target.upper())
+			assert i>=0, "unknown %s" % target
+			return i
+		else:
+			return self.idx[target]
 
-def v1port(message, offset, raw):
-	p = Port(raw=raw)
-	v1port_features = ("10MB_HD", "10MB_FD", "100MB_HD", "100MB_FD", "1GB_HD", "1GB_FD", "10GB_FD", 
-		"COPPER", "FIBER", "AUTONEG", "PAUSE", "PAUSE_ASYM")
-	packdef = ("!H6s16sIIIIII", ("port_no", "hw_addr", "name", "config", "state", "curr", "advertised", "supported", "peer"), {
-		"hw_addr": mac,
-		"name": lambda v,o: v.partition("\0")[0],
-		"config": lambda v,o: bitlist(v, ("PORT_DOWN", "NO_STP", "NO_RECV", "NO_RECV_STP", "NO_FLOOD", "NO_FWD", "NO_PACKET_IN")),
-		"state": v1port_state_readable,
-		"curr": lambda v,o: bitlist(v, v1port_features),
-		"advertised": lambda v,o: bitlist(v, v1port_features),
-		"supported": lambda v,o: bitlist(v, v1port_features),
-		"peer": lambda v,o: bitlist(v, v1port_features)
-		})
-	_bare_and_readable(p, packdef, message, offset)
-	return p
+class bit_readable:
+	def __init__(self, *bits):
+		self.idx = bits
+	
+	def __call__(self, target, obj, inverse=False):
+		if inverse:
+			ret = 0
+			for i in set(target):
+				s = self.idx.index(i.upper())
+				assert s >= 0, "unknown %s" % i
+				ret += (1<<s)
+			return ret
+		else:
+			return [self.idx[i] for i in range(len(self.idx)) if (target>>i)&1]
 
-def bitlist(target, idx):
-	return [idx[i] for i in range(len(idx)) if (target>>i)&1]
+def hexify(value, obj, inverse=False):
+	if inverse:
+		if isinstance(value, str):
+			return int(value, 16)
+		else:
+			return value
+	else:
+		return "%#x" % value
 
-def hexify(value, obj):
-	return "%#x" % value
-
-def mac(value, obj):
-	return ":".join(["%02x" % mac for mac in struct.unpack("!6B", value)])
+def mac(value, obj, inverse=False):
+	if inverse:
+		return struct.pack("!6B", [int(mac, 16) for mac in value.split(":")])
+	else:
+		return ":".join(["%02x" % mac for mac in struct.unpack("!6B", value)])
 
 # pack_string, field_names, translators
 
-def type_readable(value, obj):
-	assert obj.version==1, "not supported yet"
-	return ("HELLO", "ERROR", "ECHO_REQUEST", "ECHO_REPLY", "VENDOR", 
-		"FEATURES_REQUEST", "FEATURES_REPLY", "GET_CONFIG_REQUEST", "GET_CONFIG_REPLY", "SET_CONFIG", 
-		"PACKET_IN", "FLOW_REMOVED", "PORT_STATUS", 
-		"PACKET_OUT", "FLOW_MOD", "PORT_MOD", 
-		"STATS_REQUEST", "STATS_REPLY",
-		"BARRIER_REQUEST", "BARRIER_REPLY",
-		"QUEUE_GET_CONFIG_REQUEST", "QUEUE_GET_CONFIG_REPLY")[value]
+v1header_types = ("HELLO", "ERROR", "ECHO_REQUEST", "ECHO_REPLY", "VENDOR", 
+	"FEATURES_REQUEST", "FEATURES_REPLY", "GET_CONFIG_REQUEST", "GET_CONFIG_REPLY", "SET_CONFIG", 
+	"PACKET_IN", "FLOW_REMOVED", "PORT_STATUS", 
+	"PACKET_OUT", "FLOW_MOD", "PORT_MOD", 
+	"STATS_REQUEST", "STATS_REPLY",
+	"BARRIER_REQUEST", "BARRIER_REPLY",
+	"QUEUE_GET_CONFIG_REQUEST", "QUEUE_GET_CONFIG_REPLY")
 
-header = ("!BBHI", ("version", "type", "length", "xid"), {"type":type_readable, "xid":hexify})
+def type_readable(value, obj, inverse=False):
+	if inverse:
+		return v1header_types.index(value)
+	else:
+		return v1header_types[value]
 
-v1features_reply = ("!QIB3sII", ("datapath_id", "n_buffers", "n_tables", "_pad", "capabilities", "actions"), {
-	"datapath_id":lambda v,o: "%016x" % v,
-	"capabilities":lambda v,o: bitlist(v, ("FLOW_STATS", "TABLE_STATS", "PORT_STATS", "STP", "RESERVED", "IP_REASM", "QUEUE_STATS", "ARP_MATCH_IP")),
-	"actions":lambda v,o: bitlist(v, v1action_types)
+header = ("BBHI", ("version", "type", "length", "xid"), {"type":type_readable, "xid":hexify})
+
+v1features_reply = ("QIB3sII", ("datapath_id", "n_buffers", "n_tables", "_pad", "capabilities", "actions"), {
+	"datapath_id":lambda v,o,i: int(v,16) if i else "%016x" % v,
+	"capabilities": bit_readable("FLOW_STATS", "TABLE_STATS", "PORT_STATS", "STP", "RESERVED", "IP_REASM", "QUEUE_STATS", "ARP_MATCH_IP"),
+	"actions": bit_readable(*v1action_types)
 	})
 
-def v1error_code_readable(value, obj):
-	etype = obj.etype
+def v1error_code_readable(value, obj, inverse=False):
+	with obj._view.show(PARSED_VIEW):
+		etype = obj.etype
+	
 	if etype == "HELLO_FAILED":
 		idx = ("INCOMPATIBLE", "EPERM")
 	elif etype == "BAD_REQUEST":
@@ -207,33 +402,44 @@ def v1error_code_readable(value, obj):
 	elif etype == "PORT_MOD_FAILED":
 		idx = ("BAD_PORT", "BAD_HW_ADDR")
 	elif etype == "QUEUE_OP_FAILED":
-		id = ("BAD_PORT", "BAD_QUEUE", "EPERM")
+		idx = ("BAD_PORT", "BAD_QUEUE", "EPERM")
+	
+	if inverse:
+		return idx.index(value)
+	
 	try:
 		return idx[value]
 	except:
 		return hexify(value, obj)
 
-v1error = ("!HH", ("etype", "code"), {
-	"etype":lambda v,o:("HELLO_FAILED", "BAD_REQUEST", "BAD_ACTION", "FLOW_MOD_FAILED", "PORT_MOD_FAILED", "QUEUE_OP_FAILED")[v],
+v1error = ("HH", ("etype", "code"), {
+	"etype": enum_readable("HELLO_FAILED", "BAD_REQUEST", "BAD_ACTION", "FLOW_MOD_FAILED", "PORT_MOD_FAILED", "QUEUE_OP_FAILED"),
 	"code": v1error_code_readable
 	})
 
-def v1port_readable(value, obj):
+def v1port_readable(value, obj, inverse=False):
 	v1port = {0xff00:"MAX", 0xfff8:"IN_PORT", 0xfff9:"TABLE", 0xfffa:"NORMAL", 0xfffb:"FLOOD", 
 		0xfffc:"ALL", 0xfffd:"CONTROLLER", 0xfffe:"LOCAL", 0xffff:"NONE"}
+	if inverse:
+		for k,v in v1port.items():
+			if v==value:
+				return k
+		if isinstance(value, str):
+			return int(value, 16)
+		return value
 	return v1port.get(value, hexify(value, obj))
 
-v1packet_in = ("!IHHB", ("buffer_id", "total_len", "in_port", "reason"), {
-	"in_port":v1port_readable,
-	"reason":lambda v,o:("NO_MATCH", "ACTION")[v]
+v1packet_in = ("IHHBB", ("buffer_id", "total_len", "in_port", "reason", "_p"), {
+	"in_port": v1port_readable,
+	"reason": enum_readable("NO_MATCH", "ACTION")
 	})
 
-v1packet_out = ("!IHH", ("buffer_id", "in_port", "actions_len"), {
-	"in_port":v1port_readable
+v1packet_out = ("IHH", ("buffer_id", "in_port", "actions_len"), {
+	"in_port": v1port_readable
 	})
 
-v1port_status = ("!B", ("reason",), {
-	"reason":lambda v,o:("ADD", "DELETE", "MODIFY")[v]
+v1port_status = ("B7s", ("reason","_p7"), {
+	"reason": enum_readable("ADD", "DELETE", "MODIFY")
 	})
 
 ####################### 
@@ -302,3 +508,12 @@ def ofptuple(etherframe):
 
 ####################### 
 
+def hms_hex_xid():
+	'''Xid looks readable datetime like format when logged as hex.'''
+	now = datetime.datetime.now()
+	candidate = struct.unpack("!I", binascii.a2b_hex("%02d"*4 % (now.hour, now.minute, now.second, now.microsecond/10000)))[0]
+	if hasattr(hms_hex_xid, "dedup"):
+		if hms_hex_xid.dedup >= candidate:
+			candidate = hms_hex_xid.dedup+1
+	setattr(hms_hex_xid, "dedup", candidate)
+	return candidate

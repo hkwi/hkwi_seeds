@@ -88,6 +88,7 @@ class Connection(object):
 		self.io_log_suppress_barrier = kwargs.get("io_log_suppress_barrier")
 		
 		self.sendq = Queue()
+		self.messageq = Queue()
 	
 	@property
 	def closed(self):
@@ -120,7 +121,8 @@ class Connection(object):
 		self.send_header_only(0) # send OFP_HELLO
 	
 	def handle(self):
-		g = gevent.spawn(self._send_loop)
+		gevent.spawn(self._send_loop)
+		gevent.spawn(self._handle_message_loop)
 		self.send_hello()
 		self._recv_loop()
 	
@@ -154,7 +156,7 @@ class Connection(object):
 						pass
 					else:
 						self._log_io("recv", message)
-				gevent.spawn(self._handle_message, message)
+				self._handle_message(message)
 			except:
 				self.logger.error("Openflow message read error.", exc_info=True)
 				break
@@ -174,7 +176,11 @@ class Connection(object):
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		if oftype==2 and self.on_echo:
 			self.on_echo(message)
-		self.handle_message(message)
+		self.messageq.put(message)
+	
+	def _handle_message_loop(self):
+		while not self.closed:
+			self.handle_message(self.messageq.get())
 	
 	def handle_message(self, message):
 		warnings.warn("subclass must override this method")
@@ -239,16 +245,14 @@ class BarrieredController(Controller):
 		self.barriers = []
 		self.last_callback = None
 		self.active_callback = None # Active responder callback. This may be None, _handle_message will take care
-		self.datapathAsyncResult = AsyncResult()
+		self._datapath = None
 		self._feature_req_sent = False
 	
-	def datapath(self, wait=True):
-		if self.datapathAsyncResult.value is None and not self._feature_req_sent:
+	@property
+	def datapath(self):
+		if self._datapath is None and not self._feature_req_sent:
 			self.send_header_only(5) # OFPT_FEATURES_REQUEST
-		if wait:
-			return self.datapathAsyncResult.get()
-		else:
-			return self.datapathAsyncResult.value
+		return self._datapath
 	
 	def send(self, message, callback=None):
 		(version, oftype, length, xid) = parse_ofp_header(message)
@@ -291,8 +295,7 @@ class BarrieredController(Controller):
 			self.on_echo(message)
 		
 		if oftype == 6: # OFPT_FEATURES_REPLY
-			(datapath,) = struct.unpack_from("!Q", message, offset=8)
-			self.datapathAsyncResult.set(datapath)
+			self._datapath = struct.unpack_from("!Q", message, offset=8)[0]
 		
 		if len(self.barriers) and xid == self.barriers[0].xid:
 			barrier = self.barriers.pop(0)
@@ -302,12 +305,11 @@ class BarrieredController(Controller):
 		else:
 			callback = self.active_callback
 			if self.active_callback is None:
-				callback = self.handle_message
-			callback(message)
+				self.messageq.put(message)
+			else:
+				callback(message)
 	
 	def close(self):
-		if self.datapathAsyncResult and self.datapathAsyncResult.value is None:
-			self.datapathAsyncResult.set_exception(ConnectionException("connection closed."))
 		super(BarrieredController, self).close()
 
 class Switch(Connection):
@@ -385,12 +387,15 @@ class OvsController(BarrieredController):
 	def ofctl(self, action, *args, **options):
 		pstdout = None
 		
-		if hasattr(socket, "AF_UNIX"):
+		socket_file = None
+		if hasattr(socket, "AF_UNIX") and self.datapath:
 			s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-			socket_path = "dp_%x_internal_%d.sock" % (self.datapath(), 1000*random.random())
+			socket_path = "dp_%x_internal_%d.sock" % (self.datapath, 1000*random.random())
 			if self.socket_dir:
 				socket_path = os.path.join(self.socket_dir, socket_path)
 			s.bind(socket_path)
+			
+			socket_file = socket_path
 		else:
 			s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 			s.bind(("127.0.0.1", 0))
@@ -415,8 +420,8 @@ class OvsController(BarrieredController):
 			self.logger.error("stderr: %s" % pstderr, exc_info=True)
 		
 		server.stop()
-		if hasattr(socket, "AF_UNIX"):
-			os.remove(socket_path)
+		if socket_file:
+			os.remove(socket_file)
 		
 		return pstdout
 	
@@ -488,8 +493,8 @@ class InverseController(OvsController):
 	
 	def _handle_message(self, message):
 		super(InverseController, self)._handle_message(message)
-		if self.downstream_server is None and hasattr(socket, "AF_UNIX") and self.datapath(wait=False):
-			socket_fname = "dp_%x.sock" % (self.datapath(),)
+		if self.downstream_server is None and hasattr(socket, "AF_UNIX") and self.datapath:
+			socket_fname = "dp_%x.sock" % (self.datapath,)
 			if self.socket_dir:
 				socket_fname = os.path.join(self.socket_dir, socket_fname)
 			

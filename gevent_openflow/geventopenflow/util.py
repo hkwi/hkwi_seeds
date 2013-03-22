@@ -49,9 +49,6 @@ class Common(dict):
 		self._tail = None
 		self._readable = {}
 		self._version = 1
-# 		if isinstance(message, Common):
-# 			for attr in ("_binary", "_view", "_keys", "_readable", "_version", "_parse_body_run"):
-# 				setattr(self, attr, getattr(message, attr))
 		for key in ("version", "view"):
 			if key in kwargs:
 				setattr(self, "_"+key, kwargs[key])
@@ -151,7 +148,7 @@ class Message(Common):
 			self._append_packdef(*v1packet_in)
 		elif oftype == "PACKET_OUT":
 			self._append_packdef(*v1packet_out)
-		elif self.type == "PORT_STATUS":
+		elif oftype == "PORT_STATUS":
 			self._append_packdef(*v1port_status)
 		
 		if message:

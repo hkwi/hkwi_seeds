@@ -30,10 +30,10 @@ class WsController(HeartbeatController):
 	def send_hello(self):
 		super(WsController, self).send_hello()
 		self.ofcons.add(self)
-		spawn(self.send_hello_ws)
+		self.ws_hello_sent = False
 	
 	def send_hello_ws(self):
-		msg = json.dumps({"datapath":"%016x" % self.datapath(), "action":"connect"})
+		msg = json.dumps({"datapath":"%016x" % self.datapath, "action":"connect"})
 		for ws in self.ws_global:
 			spawn(ws.send, msg)
 	
@@ -44,18 +44,24 @@ class WsController(HeartbeatController):
 			spawn(self.close_ws)
 	
 	def close_ws(self):
-		msg = json.dumps({"datapath":"%016x" % self.datapath(), "action":"disconnect"})
-		for ws in self.ws_global:
-			spawn(ws.send, msg)
+		if self.datapath:
+			msg = json.dumps({"datapath":"%016x" % self.datapath, "action":"disconnect"})
+			for ws in self.ws_global:
+				spawn(ws.send, msg)
 	
 	def _log_io(self, direction, message):
 		self.io_logger.info("%s(%x)%s %s" % (self.__class__.__name__, id(self), direction, Message(message)))
 	
 	def handle_message(self, message):
-		datapath = "%016x" % self.datapath()
-		if datapath in self.ws_datapath:
-			for ws in self.ws_datapath[datapath]:
-				ws.send("%s" % Message(message))
+		if self.datapath:
+			if not self.ws_hello_sent:
+				self.ws_hello_sent = True
+				spawn(self.send_hello_ws)
+			
+			datapath = "%016x" % self.datapath
+			if datapath in self.ws_datapath:
+				for ws in self.ws_datapath[datapath]:
+					ws.send("%s" % Message(message))
 
 app = Flask(__name__)
 

@@ -112,7 +112,12 @@ class Common(dict):
 	
 	def serialize(self):
 		with self.show(RAW_VIEW):
-			return struct.pack(self._packs, *["" if k.startswith("_") else self[k] for k in self._keys])
+			try:
+				ret = struct.pack(self._packs, *["" if k.startswith("_") else self[k] for k in self._keys])
+			except Exception, e:
+				print self._packs, ["" if k.startswith("_") else self[k] for k in self._keys]
+				raise e
+			return ret
 	
 	def show(self, mode):
 		return Show(self._view, mode)
@@ -256,9 +261,9 @@ class Action(Common):
 		elif type == "SET_VLAN_PCP":
 			packdef = ("B", ("vlan_pcp",), {})
 		elif type in ("SET_DL_SRC", "SET_DL_DST"):
-			packdef = ("6s", ("dl_addr",), {})
+			packdef = ("6s", ("dl_addr",), {"dl_addr":mac_readable})
 		elif type in ("SET_NW_SRC", "SET_NW_DST"):
-			packdef = ("I", ("nw_addr",), {})
+			packdef = ("4s", ("nw_addr",), {"nw_addr":nw_addr_readable})
 		elif type == "SET_TW_TOS":
 			packdef = ("B", ("nw_tos",), {})
 		elif type in ("SET_TP_SRC", "SET_TP_DST"):
@@ -288,7 +293,8 @@ class Port(Common):
 			"COPPER", "FIBER", "AUTONEG", "PAUSE", "PAUSE_ASYM")
 		
 		self._append_packdef("H6s16sIIIIII", ("port_no", "hw_addr", "name", "config", "state", "curr", "advertised", "supported", "peer"), {
-			"hw_addr": mac,
+			"port_no": v1port_readable,
+			"hw_addr": mac_readable,
 			"name": lambda v,o,i: v.partition("\0")[0],
 			"config": bit_readable("PORT_DOWN", "NO_STP", "NO_RECV", "NO_RECV_STP", "NO_FLOOD", "NO_FWD", "NO_PACKET_IN"),
 			"state": v1port_state_readable,
@@ -351,17 +357,26 @@ class bit_readable:
 def hexify(value, obj, inverse=False):
 	if inverse:
 		if isinstance(value, str):
-			return int(value, 16)
+			if value.lower().startswith("0x"):
+				return int(value, 16)
+			else:
+				return int(value)
 		else:
 			return value
 	else:
 		return "%#x" % value
 
-def mac(value, obj, inverse=False):
+def mac_readable(value, obj, inverse=False):
 	if inverse:
-		return struct.pack("!6B", [int(mac, 16) for mac in value.split(":")])
+		return struct.pack("!6B", *[int(mac, 16) for mac in value.split(":")])
 	else:
 		return ":".join(["%02x" % mac for mac in struct.unpack("!6B", value)])
+
+def nw_addr_readable(value, obj, inverse=False):
+	if inverse:
+		return struct.pack("!4B", *[int(v) for v in value.split(".")])
+	else:
+		return "%d.%d.%d.%d" % struct.unpack("!4B", value)
 
 # pack_string, field_names, translators
 
@@ -421,13 +436,16 @@ def v1port_readable(value, obj, inverse=False):
 	v1port = {0xff00:"MAX", 0xfff8:"IN_PORT", 0xfff9:"TABLE", 0xfffa:"NORMAL", 0xfffb:"FLOOD", 
 		0xfffc:"ALL", 0xfffd:"CONTROLLER", 0xfffe:"LOCAL", 0xffff:"NONE"}
 	if inverse:
-		for k,v in v1port.items():
-			if v==value:
-				return k
 		if isinstance(value, str):
-			return int(value, 16)
+			for k,v in v1port.items():
+				if v==value.upper():
+					return k
+			if value.lower().startswith("0x"):
+				return int(value, 16)
+			else:
+				return int(value)
 		return value
-	return v1port.get(value, hexify(value, obj))
+	return v1port.get(value, value)
 
 v1packet_in = ("IHHBB", ("buffer_id", "total_len", "in_port", "reason", "_p"), {
 	"in_port": v1port_readable,
@@ -495,11 +513,11 @@ def ofptuple_bare(etherframe):
 
 def ofptuple_readable(etherframe):
 	t = list(ofptuple_bare(etherframe))
-	t[0] = mac(t[0], None)
-	t[1] = mac(t[1], None)
+	t[0] = mac_readable(t[0], None)
+	t[1] = mac_readable(t[1], None)
 	t[2] = "0x%04x" % t[2]
-	if t[5]: t[5] = "%d.%d.%d.%d" % struct.unpack("BBBB", t[5])
-	if t[6]: t[6] = "%d.%d.%d.%d" % struct.unpack("BBBB", t[6])
+	if t[5]: t[5] = nw_addr_readable(t[5], None)
+	if t[6]: t[6] = nw_addr_readable(t[6], None)
 	return tuple(t)
 
 def ofptuple(etherframe):

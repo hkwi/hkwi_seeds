@@ -504,7 +504,7 @@ def v4hello_bitmaps_readable(value, obj, inverse=False):
 	else:
 		o = 0
 		ret = []
-		for idx in struct.unpack("!%dI" % len(value)/4, value):
+		for idx in struct.unpack("!%dI" % (len(value)/4), value):
 			for x in range(32):
 				if (idx>>x) & 1:
 					ret.append(x+o)

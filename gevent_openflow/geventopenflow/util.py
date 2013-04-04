@@ -224,7 +224,7 @@ class Message(Common):
 			if name=="length":
 				ret = struct.calcsize(self._packs)
 				if self._tail:
-					ret += len(self._serialize_tail())
+					ret += len(self.serialize_tail())
 				return ret
 			elif name == "xid":
 				return None
@@ -480,7 +480,7 @@ class HelloElement(Common):
 			if name=="length":
 				ret = struct.calcsize(self._packs)
 				if self._tail:
-					ret += len(self._serialize_tail())
+					ret += len(self.serialize_tail())
 				return ret
 	
 	def serialize(self):

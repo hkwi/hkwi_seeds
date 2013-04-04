@@ -76,7 +76,7 @@ class Common(dict):
 		try:
 			return self[name]
 		except KeyError:
-			raise AttributeError(name)
+			raise AttributeError("%s.%s" % (self.__class__.__name__, name))
 	
 	def __setattr__(self, name, value):
 		if name.startswith("_"):
@@ -216,6 +216,19 @@ class Message(Common):
 				self._message_tail(tail, message, kwargs.get("offset", 0)+packsize)
 			if tail in kwargs:
 				self._append_tail(tail, kwargs[tail])
+	
+	def __getitem__(self, name):
+		try:
+			return super(Message, self).__getitem__(name)
+		except Exception as e:
+			if name=="length":
+				ret = struct.calcsize(self._packs)
+				if self._tail:
+					ret += len(self._serialize_tail())
+				return ret
+			elif name == "xid":
+				return None
+			raise e
 	
 	def _message_tail(self, tail, message, offset):
 		with self._view.show(PARSED_VIEW):
@@ -452,15 +465,23 @@ class HelloElement(Common):
 		
 		with self._view.show(PARSED_VIEW):
 			type = self.type
-			length = self.length
 		
 		if type=="VERSIONBITMAP":
 			if message:
-				self._append_tail("bitmaps", message[offset+4:offset+length] , {"bitmaps":v4hello_bitmaps_readable})
+				value = message[offset+4:offset+self.length]
 			else:
-				bitmaps = v4hello_bitmaps_readable(kwargs.get("bitmaps",[]), self, True)
-				self._append_tail("bitmaps", bitmaps)
-				self.length = len(bitmaps) + 4
+				value = v4hello_bitmaps_readable(kwargs.get("bitmaps",[]), self, True)
+			self._append_tail("bitmaps", value, {"bitmaps":v4hello_bitmaps_readable})
+	
+	def __getitem__(self, name):
+		try:
+			return super(Message, self).__getitem__(name)
+		except Exception as e:
+			if name=="length":
+				ret = struct.calcsize(self._packs)
+				if self._tail:
+					ret += len(self._serialize_tail())
+				return ret
 	
 	def serialize(self):
 		with self._view.show(RAW_VIEW):

@@ -3,7 +3,6 @@ import collections
 import datetime
 import json
 import struct
-import math
 
 RAW_VIEW = 0
 PARSED_VIEW = 1
@@ -493,7 +492,11 @@ class HelloElement(Common):
 def v4hello_bitmaps_readable(value, obj, inverse=False):
 	if inverse:
 		if isinstance(value, list) or isinstance(value, tuple):
-			ret = [0,]*math.ceil(max(value)/32)
+			mx = max(value)
+			rows = mx/32
+			if mx%32 != 0:
+				rows += 1
+			ret = [0,]*rows
 			for v in value:
 				ret[v/32] += 1<<(v%32)
 			return ret

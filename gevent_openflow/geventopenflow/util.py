@@ -220,7 +220,7 @@ class Message(Common):
 	def __getitem__(self, name):
 		try:
 			return super(Message, self).__getitem__(name)
-		except Exception as e:
+		except KeyError as e:
 			if name=="length":
 				ret = struct.calcsize(self._packs)
 				if self._tail:
@@ -464,9 +464,9 @@ class HelloElement(Common):
 				self.type = kwargs["type"].upper()
 		
 		with self._view.show(PARSED_VIEW):
-			type = self.type
+			htype = self.type
 		
-		if type=="VERSIONBITMAP":
+		if htype=="VERSIONBITMAP":
 			if message:
 				value = message[offset+4:offset+self.length]
 			else:
@@ -475,13 +475,14 @@ class HelloElement(Common):
 	
 	def __getitem__(self, name):
 		try:
-			return super(Message, self).__getitem__(name)
-		except Exception as e:
+			return super(HelloElement, self).__getitem__(name)
+		except KeyError as e:
 			if name=="length":
 				ret = struct.calcsize(self._packs)
 				if self._tail:
 					ret += len(self.serialize_tail())
 				return ret
+			raise e
 	
 	def serialize(self):
 		with self._view.show(RAW_VIEW):

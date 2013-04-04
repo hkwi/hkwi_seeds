@@ -499,7 +499,7 @@ def v4hello_bitmaps_readable(value, obj, inverse=False):
 			ret = [0,]*rows
 			for v in value:
 				ret[v/32] += 1<<(v%32)
-			return ret
+			return struct.pack("!%dI" % len(ret), *ret)
 		return value
 	else:
 		o = 0

@@ -76,6 +76,8 @@ class Connection(object):
 	io_logger = None
 	io_log_suppress_echo = None
 	io_log_suppress_barrier = None
+	_negotiated_version = None
+	
 	def __init__(self, socket, address, **kwargs):
 		self.socket = socket
 		self.address = address
@@ -93,6 +95,15 @@ class Connection(object):
 	@property
 	def closed(self):
 		return self.socket.closed
+	
+	@property
+	def negotiated_version(self):
+		if self._negotiated_version:
+			return self._negotiated_version.get()
+	
+	@negotiated_version.setter
+	def negotiated_version(self, value):
+		self._negotiated_version.set(value)
 	
 	def close(self):
 		if not self.closed:
@@ -113,7 +124,12 @@ class Connection(object):
 	def send(self, message):
 		self.sendq.put(message)
 	
-	def send_header_only(self, oftype, version=1, xid=None):
+	def send_header_only(self, oftype, version=None, xid=None):
+		if version is None:
+			if self.negotiated_version is not None:
+				version = self.negotiated_version
+			else:
+				version = 1
 		self.send(ofp_header_only(oftype, version=version, xid=xid))
 	
 	def send_hello(self):
@@ -124,6 +140,7 @@ class Connection(object):
 		gevent.spawn(self._send_loop)
 		gevent.spawn(self._handle_message_loop)
 		self.send_hello()
+		self._negotiated_version = AsyncResult()
 		self._recv_loop()
 	
 	def _recv_loop(self):
@@ -181,6 +198,8 @@ class Connection(object):
 	def _handle_message_loop(self):
 		while not self.closed:
 			self.handle_message(self.messageq.get())
+			if not self._negotiated_version.ready():
+				self.negotiated_version = None
 	
 	def handle_message(self, message):
 		warnings.warn("subclass must override this method")
@@ -264,7 +283,11 @@ class BarrieredController(Controller):
 			if self.last_callback != callback:
 				barrier = Barrier(hms_xid(), next_callback=callback)
 				self.barriers.append(barrier)
-				super(BarrieredController, self).send(ofp_header_only(18, xid=barrier.xid)) # OFPT_BARRIER_REQUEST=18 (v1.0)
+				if self.negotiated_version==1:
+					msg = ofp_header_only(18, version=1, xid=barrier.xid) # OFPT_BARRIER_REQUEST=18 (v1.0)
+				else:
+					msg = ofp_header_only(20, version=self.negotiated_version, xid=barrier.xid) # OFPT_BARRIER_REQUEST=20 (v1.3)
+				super(BarrieredController, self).send(msg) # NOTE: don't use send_header_only here, because it will call this method again.
 		
 		super(BarrieredController, self).send(message)
 		self.last_callback = callback
@@ -280,7 +303,12 @@ class BarrieredController(Controller):
 		if self.active_callback == callback:
 			self.active_callback = None
 	
-	def send_header_only(self, oftype, version=1, xid=None, callback=None):
+	def send_header_only(self, oftype, version=None, xid=None, callback=None):
+		if version is None:
+			if self.negotiated_version is not None:
+				version = self.negotiated_version
+			else:
+				version = 1
 		self.send(ofp_header_only(oftype, version=version, xid=xid), callback=callback)
 	
 	def _handle_message(self, message):
@@ -331,6 +359,13 @@ class ProxySwitch(Switch):
 		self.relay_echo = kwargs.get("relay_echo")
 		if self.relay_echo:
 			self.on_echo = None # upstream will be respond to echo
+		self.upstream_hello = kwargs.get("upstream_hello")
+	
+	def send_hello(self,):
+		if self.upstream_hello: # relay upstream hello message (may contain protocol negotiation info)
+			self.send(self.upstream_hello)
+		else:
+			super(ProxySwitch, self).send_hello()
 	
 	def handle_message(self, message):
 		'''
@@ -367,6 +402,10 @@ class OvsController(BarrieredController):
 		self.ofctl_io_logger_name = kwargs.get("ofctl_io_logger_name")
 	
 	def _handle_message(self, message):
+		(version, oftype, length, xid) = parse_ofp_header(message)
+		if oftype == 0:
+			self.switch_hello = message
+		
 		super(OvsController, self)._handle_message(message)
 	
 	def handle_message(self, message):
@@ -402,7 +441,7 @@ class OvsController(BarrieredController):
 			socket_path = "tcp:%s:%d" % s.getsockname()
 		s.listen(1)
 		
-		server = StreamServer(s, handle=Handle(ProxySwitch, upstream=self, io_logger_name=self.ofctl_io_logger_name)) # may pass ofctl_io_logger_name
+		server = StreamServer(s, handle=Handle(ProxySwitch, upstream=self, io_logger_name=self.ofctl_io_logger_name, upstream_hello=self.switch_hello)) # may pass ofctl_io_logger_name
 		server.start()
 		
 		cmd = ["ovs-ofctl",]
@@ -502,7 +541,7 @@ class InverseController(OvsController):
 			s.bind(socket_fname)
 			s.listen(8)
 			
-			handle = Handle(ProxySwitch, upstream=self, io_logger_name=self.inverse_io_logger_name)
+			handle = Handle(ProxySwitch, upstream=self, io_logger_name=self.inverse_io_logger_name, upstream_hello=self.switch_hello)
 			server = StreamServer(s, handle=handle)
 			server.start()
 			

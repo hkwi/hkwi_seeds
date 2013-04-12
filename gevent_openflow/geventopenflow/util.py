@@ -81,7 +81,7 @@ class Common(dict):
 	def __setattr__(self, name, value):
 		if name.startswith("_"):
 			super(Common, self).__setattr__(name, value)
-		elif name == "data" and self._view.dump:
+		elif name == "data" and self._view.dump: # data is commonly used thurough the spec
 			self[name] = binascii.a2b_hex(value)
 		elif name == self._tail or name in self._keys:
 			if name in self._readable and self._view.parsed:
@@ -112,11 +112,15 @@ class Common(dict):
 		return iter(visible_keys)
 	
 	def serialize_tail(self):
-		if self._tail:
+		if not self._tail:
+			return ''
+		else:
 			with self.show(RAW_VIEW):
 				obj = self[self._tail]
 				if isinstance(obj, str):
 					return obj
+				elif isinstance(obj, Common):
+					return obj.serialize()
 				elif isinstance(obj, list) or isinstance(obj, tuple):
 					return "".join([o.serialize() for o in obj])
 				else:
@@ -127,8 +131,9 @@ class Common(dict):
 			try:
 				ret = struct.pack(self._packs, *["" if k.startswith("_") else self[k] for k in self._keys])
 			except Exception, e:
-				print self._packs, ["" if k.startswith("_") else self[k] for k in self._keys]
+				logging.error(repr((self._packs, ["" if k.startswith("_") else self[k] for k in self._keys])))
 				raise e
+			
 			return ret + self.serialize_tail()
 	
 	def show(self, mode):
@@ -203,9 +208,14 @@ class Message(Common):
 		elif oftype == "PORT_STATUS":
 			self._append_packdef(*v1port_status) # same in v1.3
 			tail = "port"
+		elif oftype == "MULTIPART_REQUEST":
+			self._append_packdef("HH4s", ("mtype", "flags", "_pad"), {
+				"mtype": v4multipart_request_type_readable,
+				"flags": bit_readable("REQ_MORE")})
+			tail = "body"
 		
 		if message and packsize != struct.calcsize(self._packs):
-			self._unpack(message, offset=kwargs.get("offset", 0))
+			packsize = self._unpack(message, offset=kwargs.get("offset", 0))
 		
 		for key in self._keys:
 			if not key.startswith("_") and key in kwargs:
@@ -228,7 +238,7 @@ class Message(Common):
 				return ret
 			elif name == "xid":
 				return None
-			raise e
+			raise
 	
 	def _message_tail(self, tail, message, offset):
 		with self._view.show(PARSED_VIEW):
@@ -245,7 +255,7 @@ class Message(Common):
 			value = message[offset:]
 		elif oftype == "FEATURES_REPLY":
 			value = []
-			while offset_in < len(message):
+			while offset < len(message):
 				value.append(Port(message, offset=offset, view=self._view))
 				offset += 48
 		elif oftype == "PACKET_IN":
@@ -262,33 +272,74 @@ class Message(Common):
 					action = Action(message, offset=offset, version=self.version, view=self._view)
 					value.append(action)
 					offset += action.len
-		elif self.type == "PORT_STATUS":
+		elif oftype == "PORT_STATUS":
+			assert offset==16
 			value = Port(message, offset=offset, version=self.version, view=self._view)
+		elif oftype == "MULTIPART_REQUEST":
+			with self._view.show(PARSED_VIEW):
+				mtype = self.mtype
+			if mtype == "FLOW":
+				value = []
+				while offset < len(message):
+					value.append(FlowStatsRequest(message, offset=offset, view=self._view))
+					offset += 40
 		
 		if value:
 			self._append_tail(tail, value)
-	
-	def serialize(self):
+
+class Match(Common):
+	def __init__(self, message=None, **kwargs):
+		super(Match, self).__init__(**kwargs)
+		
+		offset = kwargs.get("offset",0)
+		self._append_packdef("HH", ("type", "length"), {"type": enum_readable("STANDARD", "OXM")})
+		if message:
+			self._unpack(message, offset=offset)
+		
 		with self._view.show(PARSED_VIEW):
-			oftype = self.type
+			mtype = self.type
 		
-		tail = ""
-		if oftype == "PACKET_OUT":
-			if "data" in self._keys:
-				self.buffer_id = 0xffffffff
-				with self.show(RAW_VIEW):
-					tail = self.data
-			else:
-				with self.show(RAW_VIEW):
-					tail = "".join([a.serialize() for a in self.actions])
-				self.actions_len = len(tail)
-				self.length = struct.calcsize(self._packs) + len(tail)
+		if message:
+			payload_end = offset + self.length
+			offset += struct.calcsize(self._packs)
+			if mtype == "OXM":
+				value = []
+				while offset < payload_end:
+					(x,) = struct.unpack_from("I", message, offset)
+					length = (x & 0x7f)
+					value.append(message[offset:offset+length])
+					offset += length
+				self._append_tail("oxm_fields", value)
+
+
+def v4multipart_request_type_readable(value, obj, inverse=False):
+	idx = '''DESC FLOW AGGREGATE TABLE PORT_STATS QUEUE GROUP GROUP_DESC FEATURES
+		METER METER_CONFIG METER_FEATURES TABLE_FEATURES PORT_DESC'''.split() # EXPERIMENTER 0xffff
+	if inverse:
+		if value == "EXPERIMENTER":
+			return 0xffff
+	else:
+		if value == 0xffff:
+			return "EXPERIMENTER"
+	
+	if inverse:
+		return idx.index(value)
+	else:
+		return idx[value]
+
+class FlowStatsRequest(Common):
+	def __init__(self, message=None, **kwargs):
+		super(FlowStatsRequest, self).__init__(**kwargs)
 		
-		if "version" not in self:
-			self.version = 1
+		self._append_packdef("B3sII4sQQ",
+			("table_id", "_p1", "out_port", "out_group", "_p2", "cookie", "cookie_mask"), {
+			"out_port": v4port_readable})
 		
-		self.length = struct.calcsize(self._packs)+len(tail)
-		return super(Message,self).serialize()+tail
+		if message:
+			offset = kwargs.get("offset", 0)
+			self._unpack(message, offset=offset)
+			self._append_tail("match", Match(message, offset=offset+struct.calcsize(self._packs),
+				version=self._version, view=self._view))
 
 v1action_types = ("OUTPUT", "SET_VLAN_VID", "SET_VLAN_PCP", "STRIP_VLAN", "SET_DL_SRC", "SET_DL_DST", 
 	"SET_NW_SRC", "SET_NW_DST", "SET_NW_TOS", "SET_TP_SRC", "SET_TP_DST", "ENQUEUE") # VENDOR=0xffff
@@ -482,12 +533,17 @@ class HelloElement(Common):
 				if self._tail:
 					ret += len(self.serialize_tail())
 				return ret
-			raise e
+			elif name == "bitmaps":
+				return []
+			raise
 	
 	def serialize(self):
-		with self._view.show(RAW_VIEW):
-			self.length = len(self.bitmaps) + 4
+		self.length = 4
+		if self.type == "VERSIONBITMAP":
+			with self._view.show(RAW_VIEW):
+				self.length += len(self.bitmaps)
 		return super(HelloElement, self).serialize()
+
 
 def v4hello_bitmaps_readable(value, obj, inverse=False):
 	if inverse:

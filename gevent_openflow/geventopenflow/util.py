@@ -8,6 +8,10 @@ RAW_VIEW = 0
 PARSED_VIEW = 1
 DUMP_VIEW = 2
 
+def align8(num):
+	'''64 bit alignment'''
+	return (num+7)/8*8
+
 class View(object):
 	def __init__(self):
 		self.level = 1
@@ -213,6 +217,14 @@ class Message(Common):
 				"mtype": v4multipart_request_type_readable,
 				"flags": bit_readable("REQ_MORE")})
 			tail = "body"
+		elif oftype == "FLOW_MOD":
+			if self.version==4:
+				self._append_packdef("QQBBHHHIIIH2s", ("cookie", "cookie_mask", "table_id", "command",
+					"idle_timeout", "hard_timeout", "priority", "buffer_id", "out_port", "out_group",
+					"flags", "_pad"), {
+					"out_port": v4port_readable,
+					"command": enum_readable("ADD","MODIFY","MODIFY_STRICT","DELETE","DELETE_STRICT")})
+				tail = "match"
 		
 		if message and packsize != struct.calcsize(self._packs):
 			packsize = self._unpack(message, offset=kwargs.get("offset", 0))
@@ -262,7 +274,7 @@ class Message(Common):
 			if tail=="data":
 				value = message[offset:]
 			elif tail=="match":
-				value = message[offset:] # TODO
+				value = Match(message, offset=offset, version=self._version, view=self._view)
 		elif oftype == "PACKET_OUT":
 			if self.buffer_id == 0xffffffff: # -1
 				value = message[offset:]
@@ -283,9 +295,20 @@ class Message(Common):
 				while offset < len(message):
 					value.append(FlowStatsRequest(message, offset=offset, view=self._view))
 					offset += 40
+		elif oftype == "FLOW_MOD":
+			if tail == "match":
+				value = Match(message, offset=offset, version=self._version, view=self._view)
+				# instructions
+# 				if offset+align8(value.length) < len(message):
+# 					print binascii.b2a_hex(message[offset+align8(value.length):])
 		
 		if value:
 			self._append_tail(tail, value)
+
+class MatchField(Common):
+	def __init__(self, message=None, **kwargs):
+		# TODO
+		pass
 
 class Match(Common):
 	def __init__(self, message=None, **kwargs):
@@ -306,7 +329,7 @@ class Match(Common):
 				value = []
 				while offset < payload_end:
 					(x,) = struct.unpack_from("I", message, offset)
-					length = (x & 0x7f)
+					length = (x & 0x7f) + 4 # 4 for header
 					value.append(message[offset:offset+length])
 					offset += length
 				self._append_tail("oxm_fields", value)

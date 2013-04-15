@@ -444,6 +444,12 @@ class OvsController(BarrieredController):
 		server = StreamServer(s, handle=Handle(ProxySwitch, upstream=self, io_logger_name=self.ofctl_io_logger_name, upstream_hello=self.switch_hello)) # may pass ofctl_io_logger_name
 		server.start()
 		
+		if self.negotiated_protocol != 1:
+			if "O" in options or "protocols" in options:
+				pass
+			else:
+				options["O"] = ("OpenFlow11","OpenFlow12","OpenFlow13")[self.negotiated_protocol - 1]
+		
 		cmd = ["ovs-ofctl",]
 		cmd.extend(self._make_ofctl_options(options))
 		cmd.append(action)

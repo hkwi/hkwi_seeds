@@ -106,6 +106,9 @@ class Connection(object):
 		self._negotiated_version.set(value)
 	
 	def close(self):
+		if not self._negotiated_version.ready():
+			self._negotiated_version.set_exception("Connection closed before version negotiation.")
+		
 		if not self.closed:
 			try:
 				self.socket.close()

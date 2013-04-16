@@ -1,6 +1,6 @@
 import logging
 from geventopenflow.server import HeartbeatController, Handle, hms_hex_xid
-from geventopenflow import util
+from geventopenflow import v4util as util
 from gevent.server import StreamServer
 import binascii
 
@@ -29,6 +29,7 @@ class V4Controller(HeartbeatController):
 			m = util.Message(
 				type="PACKET_OUT",
 				version=4,
+				xid = msg.xid,
 				buffer_id=msg.buffer_id,
 				in_port=0xffffffff,
 				actions=[])

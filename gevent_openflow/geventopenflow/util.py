@@ -3,6 +3,7 @@ import collections
 import datetime
 import json
 import struct
+import logging
 
 RAW_VIEW = 0
 PARSED_VIEW = 1
@@ -112,7 +113,7 @@ class Common(dict):
 	def __iter__(self):
 		visible_keys = [key for key in self._keys if not key.startswith("_")]
 		if self._tail:
-			visible_keys.append(self._tail)
+			visible_keys += self._tail.split()
 		return iter(visible_keys)
 	
 	def serialize_tail(self):
@@ -153,9 +154,14 @@ class Message(Common):
 		
 		self._append_packdef("BBHI", ("version", "type", "length", "xid"), {"type":type_readable, "xid":hexify})
 		
+		offset = None
 		if message:
-			self._unpack(message, offset=kwargs.get("offset", 0))
-			self._version = self.version
+			offset = kwargs.get("offset", 0)
+			self._unpack(message, offset=offset)
+		else:
+			self.version = kwargs["version"]
+		self._version = self.version
+		
 		if "type" in kwargs:
 			self.type = kwargs["type"]
 		
@@ -172,7 +178,7 @@ class Message(Common):
 			elif self.version==4:
 				self._append_packdef("H", ("etype",), {"etype":v4error_etype_readable})
 				if message:
-					packsize = self._unpack(message, offset=kwargs.get("offset", 0))
+					packsize = self._unpack(message, offset=offset)
 				if "etype" in kwargs:
 					self.etype = kwargs["etype"]
 				with self._view.show(PARSED_VIEW):
@@ -201,14 +207,14 @@ class Message(Common):
 				self._append_packdef(*v4packet_out)
 			
 			if message:
-				packsize = self._unpack(message, offset=kwargs.get("offset", 0))
+				packsize = self._unpack(message, offset=offset)
 			if "buffer_id" in kwargs:
 				self.buffer_id = kwargs["buffer_id"]
-		
-			if self.buffer_id == 0xffffffff: # -1
-				tail = "data"
-			else:
-				tail = "actions"
+			
+			tail = "actions"
+			if message and offset + packsize + self.actions_len < len(message) and self.buffer_id == 0xffffffff: # -1
+				tail += " data"
+				self.data = message[offset + packsize + self.actions_len:]
 		elif oftype == "PORT_STATUS":
 			self._append_packdef(*v1port_status) # same in v1.3
 			tail = "port"
@@ -250,6 +256,8 @@ class Message(Common):
 				return ret
 			elif name == "xid":
 				return None
+			elif name == "actions_len":
+				return sum([len(a.serialize()) for a in self.actions])
 			raise
 	
 	def _message_tail(self, tail, message, offset):
@@ -276,14 +284,12 @@ class Message(Common):
 			elif tail=="match":
 				value = Match(message, offset=offset, version=self._version, view=self._view)
 		elif oftype == "PACKET_OUT":
-			if self.buffer_id == 0xffffffff: # -1
-				value = message[offset:]
-			else:
-				value = []
-				while offset < len(message):
-					action = Action(message, offset=offset, version=self.version, view=self._view)
-					value.append(action)
-					offset += action.len
+			actions_end = offset + self.actions_len
+			value = []
+			while offset < actions_end:
+				action = Action(message, offset=offset, version=self.version, view=self._view)
+				value.append(action)
+				offset += action.len
 		elif oftype == "PORT_STATUS":
 			assert offset==16
 			value = Port(message, offset=offset, version=self.version, view=self._view)
@@ -304,11 +310,6 @@ class Message(Common):
 		
 		if value:
 			self._append_tail(tail, value)
-
-class MatchField(Common):
-	def __init__(self, message=None, **kwargs):
-		# TODO
-		pass
 
 class Match(Common):
 	def __init__(self, message=None, **kwargs):
@@ -332,7 +333,13 @@ class Match(Common):
 					length = (x & 0x7f) + 4 # 4 for header
 					value.append(message[offset:offset+length])
 					offset += length
-				self._append_tail("oxm_fields", value)
+				self._append_tail("oxm_fields", value, {"oxm_fields": xxx_binascii_list_readable})
+
+def xxx_binascii_list_readable(value, obj, inverse=False):
+	if inverse:
+		return [binascii.a2b_hex(v) for v in value]
+	else:
+		return [binascii.b2a_hex(v) for v in value]
 
 
 def v4multipart_request_type_readable(value, obj, inverse=False):

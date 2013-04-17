@@ -2,6 +2,8 @@ import binascii
 import json
 import struct
 import collections
+import warnings
+import traceback
 
 RAW_VIEW = 0
 PARSED_VIEW = 1
@@ -134,7 +136,7 @@ class Base(object):
 			try:
 				json.dumps(value)
 			except:
-				print name, "returned binary"
+				warnings.warn("%s.%s returned binary" % (self.__class__.__name__, name))
 				value = binascii.b2a_hex(value)
 		return value
 	
@@ -208,6 +210,7 @@ class Base(object):
 			try:
 				return json.dumps(self.plain())
 			except:
+				traceback.print_exc()
 				return "json dump failed"
 
 class Message(Base):
@@ -409,11 +412,79 @@ class Match(Base):
 	def _parsed_init(self):
 		self._append_packdef("HH", ("type", "length"), {
 			"type": enum_convert("STANDARD","OXM") })
-		self._append_vlendef(("oxm_fields", self._oxm_fields, data_convert),)
+		self._append_vlendef(("fields", self._oxm_fields, None),)
 	
 	def _oxm_fields(self, message, offset):
-		v = message[offset:offset+self.length-4]
-		return v, len(v)
+		value = []
+		end = offset + self.length - 4
+		while offset < end:
+			f = MatchField(offset=offset, parent=self)
+			value.append(f)
+			offset += (4 + f.length)
+		return value, sum([4+f.length for f in value])
+
+class MatchField(Base):
+	def __init__(self, **kwargs):
+		super(MatchField, self).__init__(**kwargs)
+		with self.show(PARSED_VIEW):
+			self._parsed_init()
+	
+	def _parsed_init(self):
+		self._append_packdef("I", ("header",), {})
+		self._append_vlendef(
+			("type", self._read_type, hex_convert),
+			("clazz", self._read_class, enum_convert(NXM_0=0x0000, NXM_1=0x0001, OPENFLOW_BASIC=0x8000, EXPERIMENTER=0xffff)),
+			("field", self._read_field, enum_convert(*'''IN_PORT IN_PHY_PORT METADATA
+				ETH_DST ETH_SRC ETH_TYPE VLAN_VID VLAN_PCP
+				IP_DSCP IP_ECN IP_PROTO
+				IPV4_SRC IPV4_DST TCP_SRC TCP_DST UDP_SRC UDP_DST
+				SCTP_SRC SCTP_DST ICMPV4_TYPE ICMPV4_CODE
+				ARP_OP ARP_SPA ARP_TPA ARP_SHA ARP_THA
+				IPV6_SRC IPV6_DST IPV6_FLABEL
+				ICMPV6_TYPE ICMPV6_CODE
+				IPV6_ND_TARGET IPV6_ND_SLL IPV6_ND_TLL
+				MPLS_LABEL MPLS_TC MPLS_BOS PBB_ISID TUNNEL_ID IPV6_EXTHDR'''.split())),
+			("hasmask", self._read_hasmask, None),
+			("length", self._read_length, None))
+		
+		value_len = self.length
+		if self.hasmask:
+			value_len = value_len/2
+		
+		if self.field in ("IN_PORT", "IN_PHY_PORT"):
+			self._append_packdef("I", ("value",), { "port": port_convert })
+			assert value_len == 4
+			assert not self.hasmask
+		elif self.field in ("ETH_DST", "ETH_SRC"):
+			self._append_packdef("6s6s", ("value", "mask"), { "value":mac_convert, "mask":mac_convert })
+			assert value_len == 6
+			assert self.hasmask
+		else:
+			if self.hasmask:
+				self._append_packdef("%ds%ds" % (value_len, value_len), ("value", "mask"), {
+					"value":data_convert,
+					"mask":data_convert})
+			else:
+				self._append_packdef("%ds" % (value_len,), ("value",), {
+					"value":data_convert})
+	
+	def _read_type(self, message, offset):
+		return self.header>>9, 0
+	
+	def _read_class(self, message, offset):
+		return self.header>>16, 0
+	
+	def _read_field(self, message, offset):
+		return (self.header>>9)&0x7F, 0
+	
+	def _read_hasmask(self, message, offset):
+		return (self.header>>8)&1, 0
+	
+	def _read_length(self, message, offset):
+		return self.header&0xFF, 0
+	
+	def _read_payload(self, message, offset):
+		return message[offset:offset+self.length], self.length
 
 class Action(Base):
 	def __init__(self, **kwargs):
@@ -440,15 +511,20 @@ class Action(Base):
 		elif self.type in ("PUSH_VLAN", "PUSH_MPLS", "PUSH_PBB", "POP_MPLS"):
 			self._append_packdef("H2x", ("ethertype",), {})
 		elif self.type == "SET_FIELD":
-			self._append_vlendef(("fields", self._oxm_fields, data_convert),)
+			self._append_vlendef(("fields", self._oxm_fields, None),)
 		elif self.type == "EXPERIMENTER":
 			self._append_packdef("I", ("experimenter",), {})
 		else:
 			self._append_packdef("4x", (), {})
 	
 	def _oxm_fields(self, message, offset):
-		v = mesage[offset:offset+self.length-4] # TODO
-		return v, len(v)
+		value = []
+		end = offset + self.length - 4
+		while offset < end:
+			f = MatchField(offset=offset, parent=self)
+			value.append(f)
+			offset += (4 + f.length)
+		return value, sum([4+f.length for f in value])
 
 class Instruction(Base):
 	def __init__(self, **kwargs):

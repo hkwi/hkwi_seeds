@@ -200,7 +200,11 @@ class Connection(object):
 	
 	def _handle_message_loop(self):
 		while not self.closed:
-			self.handle_message(self.messageq.get())
+			try:
+				self.handle_message(self.messageq.get())
+			except:
+				self.close()
+				raise
 			if not self._negotiated_version.ready():
 				self.negotiated_version = None
 	
@@ -435,6 +439,7 @@ class OvsController(BarrieredController):
 			socket_path = "dp_%x_internal_%d.sock" % (self.datapath, 1000*random.random())
 			if self.socket_dir:
 				socket_path = os.path.join(self.socket_dir, socket_path)
+			socket_path = os.path.abspath(socket_path)
 			s.bind(socket_path)
 			
 			socket_file = socket_path
@@ -447,11 +452,11 @@ class OvsController(BarrieredController):
 		server = StreamServer(s, handle=Handle(ProxySwitch, upstream=self, io_logger_name=self.ofctl_io_logger_name, upstream_hello=self.switch_hello)) # may pass ofctl_io_logger_name
 		server.start()
 		
-		if self.negotiated_protocol != 1:
+		if self.negotiated_version != 1:
 			if "O" in options or "protocols" in options:
 				pass
 			else:
-				options["O"] = ("OpenFlow11","OpenFlow12","OpenFlow13")[self.negotiated_protocol - 1]
+				options["O"] = ("OpenFlow10","OpenFlow11","OpenFlow12","OpenFlow13")[self.negotiated_version - 1]
 		
 		cmd = ["ovs-ofctl",]
 		cmd.extend(self._make_ofctl_options(options))

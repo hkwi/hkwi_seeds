@@ -130,7 +130,11 @@ class Base(object):
 					raise AttributeError(name)
 		
 		if name in self._show_rule and self._context.parsed:
-			value = self._show_rule[name](value, obj=self)
+			try:
+				value = self._show_rule[name](value, obj=self)
+			except:
+				warnings.warn("conversion failed for %s" % name)
+				raise
 		
 		if self._context.dump and isinstance(value, str):
 			try:
@@ -319,7 +323,7 @@ class Message(Base):
 			
 			self._append_packdef("HH4x", ("mtype", "flags"), {
 				"mtype": enum_convert(*'''DESC FLOW AGGREGATE TABLE PORT_STATS QUEUE GROUP
-					GROUP_DESC GROUP_FEATURES METER METER_CONFIG METER_FEATURES PORT_DESC'''.split(),
+					GROUP_DESC GROUP_FEATURES METER METER_CONFIG METER_FEATURES TABLE_FEATURES PORT_DESC'''.split(),
 					EXPERIMENTER=0xffff),
 				"flags": flags_convert})
 			self._append_vlendef(("body", self._multi_body, None),)
@@ -478,9 +482,10 @@ class MatchField(Base):
 			assert value_len == 4
 			assert not self.hasmask
 		elif self.field in ("ETH_DST", "ETH_SRC"):
-			self._append_packdef("6s6s", ("value", "mask"), { "value":mac_convert, "mask":mac_convert })
+			self._append_packdef("6s", ("value",), {"value":mac_convert})
+			if self.hasmask:
+				self._append_packdef("6s", ("mask",), {"mask":mac_convert})
 			assert value_len == 6
-			assert self.hasmask
 		else:
 			if self.hasmask:
 				self._append_packdef("%ds%ds" % (value_len, value_len), ("value", "mask"), {
@@ -523,7 +528,7 @@ class Action(Base):
 		if self.type == "OUTPUT":
 			self._append_packdef("IH6x", ("port","max_len"), {
 				"port": port_convert,
-				"max_len": enum_convert(MAX=0xffe5, NOBUFFER=0xffff)})
+				"max_len": num_some_convert(MAX=0xffe5, NOBUFFER=0xffff)})
 		elif self.type == "SET_QUEUE":
 			self._append_packdef("I", ("queue_id",), {})
 		elif self.type == "SET_MPLS_TTL":
@@ -693,23 +698,32 @@ def data_convert(value, obj=None, inverse=False):
 		value = binascii.b2a_hex(value)
 	return value
 
-def port_convert(value, obj=None, inverse=False):
-	v4port = {0xffffff00:"MAX", 0xfffffff8:"IN_PORT", 0xfffffff9:"TABLE", 0xfffffffa:"NORMAL",
-		0xfffffffb:"FLOOD", 0xfffffffc:"ALL", 0xfffffffd:"CONTROLLER", 0xfffffffe:"LOCAL", 0xffffffff:"ANY"}
-	if inverse:
-		if isinstance(value, int):
-			return value
-		elif isinstance(value, str):
-			for k,v in v4port.items():
-				if v==value.upper():
-					return k
-			if value.lower().startswith("0x"):
-				return int(value, 16)
+class num_some_convert(object):
+	def __init__(self, **kwargs):
+		self.idx = kwargs
+	
+	def __call__(self, value, obj=None, inverse=False):
+		if inverse:
+			if isinstance(value, int):
+				return value
+			elif isinstance(value, str):
+				try:
+					return self.idx[value.upper()]
+				except KeyError:
+					if value.lower().startswith("0x"):
+						return int(value, 16)
+					else:
+						return int(value)
 			else:
-				return int(value)
-		else:
-			raise TypeError("accepts int or str : %s" % value)
-	return v4port.get(value, value)
+				raise TypeError("accepts int or str : %s" % value)
+		for s,n in self.idx.items():
+			if n==value:
+				return s
+		return value
+
+port_convert = num_some_convert(MAX=0xffffff00, IN_PORT=0xfffffff8, TABLE=0xfffffff9,
+	NORMAL=0xfffffffa, FLOOD=0xfffffffb, ALL=0xfffffffc, CONTROLLER=0xfffffffd,
+	LOCAL=0xfffffffe, ANY=0xffffffff)
 
 port_features_convert = bit_convert(*'''10MB_HD 10MB_FD 100MB_HD 100MB_FD 1GB_HD 1GB_FD 10GB_FD 40GB_FD
 	100GB_FD 1TB_FD OTHER COPPER FIBER AUTONEG PAUSE PAUSE_ASYM'''.split())

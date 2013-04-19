@@ -391,6 +391,15 @@ class Message(Base):
 					value.append(PortStats(offset=offset, parent=self))
 					offset += 112
 				return value, len(value)*112
+		elif self.mtype=="PORT_DESC":
+			if self.type=="MULTIPART_REQUEST":
+				return "", 0
+			else:
+				value = []
+				while offset < len(message):
+					value.append(Port(offset=offset, parent=self))
+					offset += 64
+				return value, len(value)*64
 		
 		return binascii.b2a_hex(message[offset:]), len(message)-offset
 

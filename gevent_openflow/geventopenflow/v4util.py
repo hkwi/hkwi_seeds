@@ -311,13 +311,18 @@ class Message(Base):
 				"reason": enum_convert("ADD", "DELETE", "MODIFY")
 				})
 			self._append_vlendef(("desc", self._port, None),)
-		elif self.type == "MULTIPART_REQUEST":
+		elif self.type in ("MULTIPART_REQUEST", "MULTIPART_REPLY"):
+			if self.type == "MULTIPART_REQUEST":
+				flags_convert = bit_convert("REQ_MORE")
+			else:
+				flags_convert = bit_convert("REPLY_MORE")
+			
 			self._append_packdef("HH4x", ("mtype", "flags"), {
 				"mtype": enum_convert(*'''DESC FLOW AGGREGATE TABLE PORT_STATS QUEUE GROUP
 					GROUP_DESC GROUP_FEATURES METER METER_CONFIG METER_FEATURES PORT_DESC'''.split(),
 					EXPERIMENTER=0xffff),
-				"flags": bit_convert("REQ_MORE")})
-			self._append_vlendef(("body", self._multi_body, None),)
+				"flags": flags_convert})
+			self._append_vlendef(("body", self._multi_body, data_convert),)
 		elif self.type == "FLOW_MOD":
 			self._append_packdef("QQBBHHHIIIH2x", ("cookie", "cookie_mask", "table_id", "command",
 				"idle_timeout", "hard_timeout", "priority", "buffer_id", "out_port", "out_group",
@@ -377,7 +382,7 @@ class Message(Base):
 		return p, 64
 	
 	def _multi_body(self, message, offset):
-		return None, 0
+		return message[offset:], len(message)-offset
 
 class HelloElement(Base):
 	def __init__(self, **kwargs):
@@ -566,7 +571,25 @@ class Port(Base):
 			("port_no", "hw_addr", "name", "config", "state", "curr", "advertised", "supported", "peer", "curr_speed", "max_speed"), {
 			"port_no": port_convert,
 			"hw_addr": mac_convert,
-			"name": str_convert})
+			"name": str_convert,
+			"config": bit_config("PORT_DOWN", NO_RECV=2, NO_FWD=5, NO_PACKET_IN=6),
+			"state": bit_convert("LINK_DOWN","BLOCKED","LIVE"),
+			"advertised": port_features_convert, 
+			"supported": port_features_convert, 
+			"peer": port_features_convert})
+
+class PortStats(Base):
+	def __init__(self, **kwargs):
+		super(PortStats, self).__init__(**kwargs)
+		with self.show(PARSED_VIEW):
+			self._parsed_init()
+	
+	def _parsed_init(self):
+		self._append_packdef("I4x12Q2I",
+			'''port_no rx_packets, tx_packets, rx_bytes tx_bytes rx_dropped tx_dropped
+			rx_errors tx_errors rx_frame_err rx_over_err rx_crc_err collisions duration_sec duration_nsec'''.split(), {
+			"port_no": port_convert
+			})
 
 class pad(object):
 	def __init__(self, length):
@@ -657,6 +680,9 @@ def port_convert(value, obj=None, inverse=False):
 		else:
 			raise TypeError("accepts int or str : %s" % value)
 	return v4port.get(value, value)
+
+port_features_convert = bit_convert(*'''10MB_HD 10MB_FD 100MB_HD 100MB_FD 1GB_HD 1GB_FD 10GB_FD 40GB_FD
+	100GB_FD 1TB_FD OTHER COPPER FIBER AUTONEG PAUSE PAUSE_ASYM'''.split())
 
 def hello_bitmaps_convert(value, obj=None, inverse=False):
 	if inverse:

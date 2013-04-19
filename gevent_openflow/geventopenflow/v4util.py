@@ -537,8 +537,8 @@ class Instruction(Base):
 	
 	def _parsed_init(self):
 		self._append_packdef("HH", ("type","len"), {
-			"type": enum_convert(*"GOTO_TABLE WRITE_METADATA WRITE_ACTIONS APPLY_ACTIONS CLEAR_ACTIONS".split(),
-				EXPERIMENTER=0xffff)})
+			"type": enum_convert(GOTO_TABLE=1, WRITE_METADATA=2, WRITE_ACTIONS=3, APPLY_ACTIONS=4, CLEAR_ACTIONS=5,
+				METER=6, EXPERIMENTER=0xffff)})
 		if self.type == "GOTO_TABLE":
 			self._append_packdef("B3x", ("table_id",), {})
 		elif self.type == "WRITE_METADATA":

@@ -343,8 +343,6 @@ class Message(Base):
 	
 	def _data(self, message, offset=0):
 		value = message[offset:]
-		if self._context.dump:
-			value = binascii.b2a_hex(value)
 		return value, len(message)-offset
 	
 	def _match(self, message, offset):
@@ -638,7 +636,9 @@ def data_convert(value, obj=None, inverse=False):
 				return value
 		else:
 			raise TypeError("must be a binary sequence")
-	return binascii.b2a_hex(value)
+	if obj._context.dump:
+		value = binascii.b2a_hex(value)
+	return value
 
 def port_convert(value, obj=None, inverse=False):
 	v4port = {0xffffff00:"MAX", 0xfffffff8:"IN_PORT", 0xfffffff9:"TABLE", 0xfffffffa:"NORMAL",

@@ -317,7 +317,7 @@ class Message(Base):
 					GROUP_DESC GROUP_FEATURES METER METER_CONFIG METER_FEATURES PORT_DESC'''.split(),
 					EXPERIMENTER=0xffff),
 				"flags": bit_convert("REQ_MORE")})
-			self._append_packdef(("body", self._multi_body, None),)
+			self._append_vlendef(("body", self._multi_body, None),)
 		elif self.type == "FLOW_MOD":
 			self._append_packdef("QQBBHHHIIIH2x", ("cookie", "cookie_mask", "table_id", "command",
 				"idle_timeout", "hard_timeout", "priority", "buffer_id", "out_port", "out_group",

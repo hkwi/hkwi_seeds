@@ -574,8 +574,9 @@ class Port(Base):
 			"name": str_convert,
 			"config": bit_convert("PORT_DOWN", NO_RECV=2, NO_FWD=5, NO_PACKET_IN=6),
 			"state": bit_convert("LINK_DOWN","BLOCKED","LIVE"),
-			"advertised": port_features_convert, 
-			"supported": port_features_convert, 
+			"curr": port_features_convert,
+			"advertised": port_features_convert,
+			"supported": port_features_convert,
 			"peer": port_features_convert})
 
 class PortStats(Base):

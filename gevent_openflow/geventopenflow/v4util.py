@@ -572,7 +572,7 @@ class Port(Base):
 			"port_no": port_convert,
 			"hw_addr": mac_convert,
 			"name": str_convert,
-			"config": bit_config("PORT_DOWN", NO_RECV=2, NO_FWD=5, NO_PACKET_IN=6),
+			"config": bit_convert("PORT_DOWN", NO_RECV=2, NO_FWD=5, NO_PACKET_IN=6),
 			"state": bit_convert("LINK_DOWN","BLOCKED","LIVE"),
 			"advertised": port_features_convert, 
 			"supported": port_features_convert, 

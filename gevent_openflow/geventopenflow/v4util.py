@@ -322,7 +322,7 @@ class Message(Base):
 					GROUP_DESC GROUP_FEATURES METER METER_CONFIG METER_FEATURES PORT_DESC'''.split(),
 					EXPERIMENTER=0xffff),
 				"flags": flags_convert})
-			self._append_vlendef(("body", self._multi_body, data_convert),)
+			self._append_vlendef(("body", self._multi_body, None),)
 		elif self.type == "FLOW_MOD":
 			self._append_packdef("QQBBHHHIIIH2x", ("cookie", "cookie_mask", "table_id", "command",
 				"idle_timeout", "hard_timeout", "priority", "buffer_id", "out_port", "out_group",
@@ -382,7 +382,17 @@ class Message(Base):
 		return p, 64
 	
 	def _multi_body(self, message, offset):
-		return message[offset:], len(message)-offset
+		if self.mtype=="PORT_STATS":
+			if self.type=="MULTIPART_REQUEST":
+				return PortStatsRequest(offset=offset, parent=self), 8
+			else:
+				value = []
+				while offset < len(message):
+					value.append(PortStats(offset=offset, parent=self))
+					offset += 112
+				return value, len(value)*112
+		
+		return binascii.b2a_hex(message[offset:]), len(message)-offset
 
 class HelloElement(Base):
 	def __init__(self, **kwargs):
@@ -578,6 +588,16 @@ class Port(Base):
 			"advertised": port_features_convert,
 			"supported": port_features_convert,
 			"peer": port_features_convert})
+
+class PortStatsRequest(Base):
+	def __init__(self, **kwargs):
+		super(PortStatsRequest, self).__init__(**kwargs)
+		with self.show(PARSED_VIEW):
+			self._parsed_init()
+	
+	def _parsed_init(self):
+		self._append_packdef("I4x",("port_no",), {
+			"port_no": port_convert })
 
 class PortStats(Base):
 	def __init__(self, **kwargs):

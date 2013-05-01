@@ -525,6 +525,7 @@ class Action(Base):
 				PUSH_VLAN POP_FLAN PUSH_MPLS POP_MPLS SET_QUEUE GROUP SET_NW_TTL DEC_NW_TTL
 				SET_FIELD PUSH_PBB POP_PBB'''.split(),
 				EXPERIMENTER=0xffff)})
+		self._auto_vals["len"] = self._auto_len
 		if self.type == "OUTPUT":
 			self._append_packdef("IH6x", ("port","max_len"), {
 				"port": port_convert,
@@ -552,6 +553,11 @@ class Action(Base):
 			value.append(f)
 			offset += (4 + f.length)
 		return value, sum([4+f.length for f in value])
+	
+	def _auto_len(self, s):
+		self.len = 0
+		self.len = len(self.serialize())
+		return self.len
 
 class Instruction(Base):
 	def __init__(self, **kwargs):

@@ -427,8 +427,11 @@ class OvsController(BarrieredController):
 	def add_flow(self, flow):
 		return self.ofctl("add-flow", flow)
 	
-	def del_flows(self):
-		return self.ofctl("del-flows")
+	def del_flows(self, flow=None):
+		if flow is None:
+			return self.ofctl("del-flows")
+		else:
+			return self.ofctl("del-flows", flow)
 	
 	def ofctl(self, action, *args, **options):
 		pstdout = None

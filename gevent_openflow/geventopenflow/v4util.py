@@ -334,6 +334,16 @@ class Message(Base):
 				"out_port": port_convert,
 				"command": enum_convert("ADD","MODIFY","MODIFY_STRICT","DELETE","DELETE_STRICT")})
 			self._append_vlendef(("match", self._match, None),("instructions", self._instructions, None))
+		elif self.type == "GROUP_MOD":
+			self._append_packdef("HBxI", ("command", "gtype", "group_id"), {
+				"command": enum_convert("ADD", "MODIFY", "DELETE"),
+				"gtype": enum_convert("ALL", "SELECT", "INDIRECT", "FF") })
+			self._append_vlendef(("buckets", self._group_buckets, None))
+	
+	def _group_buckets(self, s):
+		value = []
+		# XXX:
+		return value, 0
 	
 	def _auto_length(self, s):
 		self.length = 0

@@ -8,7 +8,6 @@ import warnings
 import gevent
 from gevent import socket
 from gevent import subprocess
-from gevent.event import AsyncResult
 from gevent.queue import Queue
 from gevent.server import StreamServer
 
@@ -40,12 +39,6 @@ def hms_xid():
 	setattr(hms_xid, "dedup", candidate)
 	return candidate
 
-class ConnectionException(Exception):
-	'''
-	AsyncResult failed due to connection close.
-	'''
-	pass
-
 class Handle(object):
 	'''
 	Server handle function that can have some configurations.
@@ -59,8 +52,10 @@ class Handle(object):
 	def __call__(self, socket, address):
 		con = self.connection_class(socket, address, **self.kwargs)
 		self.connections.add(con)
-		con.handle()
-		self.connections.remove(con)
+		try:
+			con.handle()
+		finally:
+			self.connections.remove(con)
 	
 	def __enter__(self):
 		return self
@@ -76,7 +71,7 @@ class Connection(object):
 	io_logger = None
 	io_log_suppress_echo = None
 	io_log_suppress_barrier = None
-	_negotiated_version = None
+	negotiated_version = None # negotiated openflow protocol version
 	
 	def __init__(self, socket, address, **kwargs):
 		self.socket = socket
@@ -96,24 +91,73 @@ class Connection(object):
 	def closed(self):
 		return self.socket.closed
 	
-	@property
-	def negotiated_version(self):
-		if self._negotiated_version:
-			return self._negotiated_version.get()
-	
-	@negotiated_version.setter
-	def negotiated_version(self, value):
-		self._negotiated_version.set(value)
-	
 	def close(self):
-		if not self._negotiated_version.ready():
-			self._negotiated_version.set_exception("Connection closed before version negotiation.")
-		
 		if not self.closed:
 			try:
 				self.socket.close()
 			except:
 				self.logger.error("socket close error", exc_info=True)
+	
+	def handle(self):
+		gevent.spawn(self._send_loop)
+		gevent.spawn(self._handle_message_loop)
+		self.send_hello()
+		self.negotiated_version = None
+		self._recv_loop()
+	
+	def _recv_loop(self): # main thread
+		OFP_HEADER_LEN = 8 # sizeof(struct ofp_header)
+		while not self.closed:
+			message = bytearray()
+			try:
+				while len(message) < OFP_HEADER_LEN and not self.closed:
+					ext = self.socket.recv(OFP_HEADER_LEN-len(message))
+					if len(ext) == 0:
+						break
+					message += ext
+				if len(message) == 0: # normal shutdown
+					break
+				assert len(message) == OFP_HEADER_LEN, "Read error in openflow message header."
+				
+				(version,oftype,message_len,x) = parse_ofp_header(bytes(message))
+				while len(message) < message_len and not self.closed:
+					ext = self.socket.recv(message_len-len(message))
+					if len(ext) == 0:
+						break
+					message += ext
+				assert len(message) == message_len, "Read error in openflow message body."
+				
+				message = bytes(message) # freeze the message for ease in dump
+				if self.io_logger:
+					if oftype in (2,3) and self.io_log_suppress_echo:
+						pass
+					elif ((oftype in (18,19) and version==1) or (oftype in (20,21) and version!=1)) and self.io_log_suppress_barrier:
+						pass
+					else:
+						self._log_io("recv", message)
+				self._handle_message(message)
+			except:
+				self.logger.error("Openflow message read error.", exc_info=True)
+				break
+		self.close()
+	
+	def _send_loop(self): # runs in another thread
+		while not self.closed:
+			try:
+				message = self.sendq.get()
+				if self.io_logger:
+					(version, oftype, length, xid) = parse_ofp_header(message)
+					if oftype in (2,3) and self.io_log_suppress_echo:
+						pass
+					elif ((oftype in (18,19) and version==1) or (oftype in (20,21) and version!=1)) and self.io_log_suppress_barrier:
+						pass
+					else:
+						self._log_io("send", message)
+				self.socket.sendall(message)
+			except:
+				self.logger.error("Openflow message write error.", exc_info=True)
+				self.close()
+				break
 	
 	def _log_io(self, direction, message):
 		zdata = self._ofp_common_fields(message)
@@ -139,53 +183,13 @@ class Connection(object):
 		# subclass may replace this, to change openflow version.
 		self.send_header_only(0) # send OFP_HELLO
 	
-	def handle(self):
-		gevent.spawn(self._send_loop)
-		gevent.spawn(self._handle_message_loop)
-		self.send_hello()
-		self._negotiated_version = AsyncResult()
-		self._recv_loop()
-	
-	def _recv_loop(self):
-		OFP_HEADER_LEN = 8 # sizeof(struct ofp_header)
-		while not self.closed:
-			message = bytearray()
-			try:
-				while len(message) < OFP_HEADER_LEN and not self.closed:
-					ext = self.socket.recv(OFP_HEADER_LEN-len(message))
-					if len(ext) == 0:
-						break
-					message += ext
-				if len(message) == 0: # normal shutdown
-					break
-				assert len(message) == OFP_HEADER_LEN, "Read error in openflow message header."
-				
-				(version,oftype,message_len,x) = parse_ofp_header(bytes(message))
-				while len(message) < message_len and not self.closed:
-					ext = self.socket.recv(message_len-len(message))
-					if len(ext) == 0:
-						break
-					message += ext
-				assert len(message) == message_len, "Read error in openflow message body."
-				
-				message = bytes(message)
-				if self.io_logger:
-					if oftype in (2,3) and self.io_log_suppress_echo:
-						pass
-					elif ((oftype in (18,19) and version==1) or (oftype in (20,21) and version!=1)) and self.io_log_suppress_barrier:
-						pass
-					else:
-						self._log_io("recv", message)
-				self._handle_message(message)
-			except:
-				self.logger.error("Openflow message read error.", exc_info=True)
-				break
-		self.close()
-	
 	def on_echo(self, message):
 		# Convenient method to responding to ofp echo_request. Subclass may use this.
 		#
-		# Both controller and switch will send echo reply
+		# Both controller and switch will send echo reply.
+		# If subclass don't want the default behavior, just set this method to None.
+		# If you override this method, don't invoke I/O in this method, if you'd like 
+		# to do I/O with echo request, put it in handle_message method.
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		self.send(struct.pack("!BBHI", version, 3, 8+length, xid)+message)
 	
@@ -196,43 +200,25 @@ class Connection(object):
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		if oftype==2 and self.on_echo:
 			self.on_echo(message)
+		elif oftype==1 and self.on_error:
+			self.on_error(message)
 		self.messageq.put(message)
 	
-	def _handle_message_loop(self):
+	def _handle_message_loop(self): # runs in another thread
+		# This runs in another thread, because handle_message sometimes
+		# invokes another I/O in its processing.
 		while not self.closed:
 			try:
 				self.handle_message(self.messageq.get())
-			except:
+			finally:
 				self.close()
-				raise
-			if not self._negotiated_version.ready():
-				self.negotiated_version = None
 	
 	def handle_message(self, message):
 		warnings.warn("subclass must override this method")
-	
-	def _send_loop(self): # runs in another thread
-		while not self.closed:
-			try:
-				message = self.sendq.get()
-				if self.io_logger:
-					(version, oftype, length, xid) = parse_ofp_header(message)
-					if oftype in (2,3) and self.io_log_suppress_echo:
-						pass
-					elif ((oftype in (18,19) and version==1) or (oftype in (20,21) and version!=1)) and self.io_log_suppress_barrier:
-						pass
-					else:
-						self._log_io("send", message)
-				self.socket.sendall(message)
-			except:
-				self.logger.error("Openflow message write error.", exc_info=True)
-				self.close()
-				break
 
 class Controller(Connection):
 	def __init__(self, *args, **kwargs):
 		super(Controller, self).__init__(*args, **kwargs)
-		self.barriered = False
 	
 	def on_packet(self, message):
 		'''
@@ -240,7 +226,7 @@ class Controller(Connection):
 		'''
 		(version, oftype, length, xid) = parse_ofp_header(message)
 		(buffer_id, ) = struct.unpack_from("!I", message, offset=8)
-		# default action "do nothing about that buffer"
+		# default action "DROP"
 		if version==1:
 			msg = struct.pack("!IHH", buffer_id, 0xffff, 0) # OFPP_NONE=0xffff
 		else:
@@ -271,6 +257,7 @@ class BarrieredController(Controller):
 		self.barriers = []
 		self.last_callback = None
 		self.active_callback = None # Active responder callback. This may be None, _handle_message will take care
+		
 		self._datapath = None
 		self._feature_req_sent = False
 	
@@ -287,7 +274,7 @@ class BarrieredController(Controller):
 		if (oftype==18 and version==1) or (oftype==20 and version!=1): # OFPT_BARRIER_REQUEST
 			self.barriers.append(Barrier(xid, this_callback=callback))
 		else:
-			if self.last_callback != callback:
+			if self.last_callback != callback: # auto-generate a barrier
 				barrier = Barrier(hms_xid(), next_callback=callback)
 				self.barriers.append(barrier)
 				if self.negotiated_version==1:
@@ -304,7 +291,7 @@ class BarrieredController(Controller):
 			if barrier.this_callback == callback:
 				barrier.this_callback = None
 			if barrier.next_callback == callback:
-				barrier.this_callback = None
+				barrier.next_callback = None
 		if self.last_callback == callback:
 			self.last_callback = None
 		if self.active_callback == callback:
@@ -324,12 +311,11 @@ class BarrieredController(Controller):
 		if (oftype==19 and version==1) or (oftype==21 and version!=1):
 			assert xid == self.barriers[0].xid, "switch replied to unknown barrier request or barrier is out of order."
 		
-		if oftype==1:
-			self.on_error(message)
-		elif oftype==2 and self.on_echo:
+		if oftype==2 and self.on_echo:
 			self.on_echo(message)
-		
-		if oftype == 6: # OFPT_FEATURES_REPLY
+		elif oftype==1 and self.on_error:
+			self.on_error(message)
+		elif oftype == 6: # OFPT_FEATURES_REPLY
 			self._datapath = struct.unpack_from("!Q", message, offset=8)[0]
 		
 		if len(self.barriers) and xid == self.barriers[0].xid:
@@ -363,10 +349,13 @@ class ProxySwitch(Switch):
 	def __init__(self, *args, **kwargs):
 		super(ProxySwitch, self).__init__(*args, **kwargs)
 		self.upstream = kwargs["upstream"]
+		assert isinstance(self.upstream, Controller), "upstream Controller instance is required."
+		
 		self.relay_echo = kwargs.get("relay_echo")
 		if self.relay_echo:
 			self.on_echo = None # upstream will be respond to echo
-		self.upstream_hello = kwargs.get("upstream_hello")
+		
+		self.upstream_hello = kwargs.get("upstream_hello") # upstream hello message bytes if available
 	
 	def send_hello(self,):
 		if self.upstream_hello: # relay upstream hello message (may contain protocol negotiation info)
@@ -397,6 +386,7 @@ class ProxySwitch(Switch):
 	def close(self,):
 		self.upstream.detach(self.send_by_proxy)
 		super(ProxySwitch, self).close()
+
 
 class OvsController(BarrieredController):
 	ofctl_logger = None
@@ -437,53 +427,59 @@ class OvsController(BarrieredController):
 		pstdout = None
 		
 		socket_file = None
-		if hasattr(socket, "AF_UNIX") and self.datapath:
-			s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-			socket_path = "dp_%x_internal_%d.sock" % (self.datapath, 1000*random.random())
-			if self.socket_dir:
-				socket_path = os.path.join(self.socket_dir, socket_path)
-			socket_path = os.path.abspath(socket_path)
-			s.bind(socket_path)
-			
-			socket_file = socket_path
-		else:
+		try:
 			s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 			s.bind(("127.0.0.1", 0))
 			socket_path = "tcp:%s:%d" % s.getsockname()
+		except socket.error:
+			if hasattr(socket, "AF_UNIX") and self.datapath:
+				s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+				socket_path = "dp_%x_internal_%d.sock" % (self.datapath, 1000*random.random())
+				if self.socket_dir:
+					socket_path = os.path.join(self.socket_dir, socket_path)
+				socket_path = os.path.abspath(socket_path)
+				s.bind(socket_path)
+				
+				socket_file = socket_path
+			else:
+				raise
+		
 		s.listen(1)
 		
-		server = StreamServer(s, handle=Handle(ProxySwitch, upstream=self, io_logger_name=self.ofctl_io_logger_name, upstream_hello=self.switch_hello)) # may pass ofctl_io_logger_name
-		server.start()
+		try:
+			server = StreamServer(s, handle=Handle(ProxySwitch, upstream=self, io_logger_name=self.ofctl_io_logger_name, upstream_hello=self.switch_hello)) # may pass ofctl_io_logger_name
+			server.start()
 		
-		if self.negotiated_version != 1:
-			if "O" in options or "protocols" in options:
-				pass
-			else:
-				options["O"] = ("OpenFlow10","OpenFlow11","OpenFlow12","OpenFlow13")[self.negotiated_version - 1]
+			if self.negotiated_version != 1:
+				if "O" in options or "protocols" in options:
+					pass
+				else:
+					options["O"] = ("OpenFlow10","OpenFlow11","OpenFlow12","OpenFlow13")[self.negotiated_version - 1]
 		
-		cmd = ["ovs-ofctl",]
-		cmd.extend(self._make_ofctl_options(options))
-		cmd.append(action)
-		cmd.append(socket_path)
-		cmd.extend(args)
-		if self.ofctl_logger:
-			self.ofctl_logger.debug("call: %s" % " ".join(cmd))
-		p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-		(pstdout, pstderr) = p.communicate()
-		if self.ofctl_logger:
-			self.ofctl_logger.debug("stdout: %s" % pstdout)
-		if p.poll():
-			self.logger.error("stderr: %s" % pstderr, exc_info=True)
+			cmd = ["ovs-ofctl",]
+			cmd.extend(self._make_ofctl_options(options))
+			cmd.append(action)
+			cmd.append(socket_path)
+			cmd.extend(args)
+			if self.ofctl_logger:
+				self.ofctl_logger.debug("call: %s" % " ".join(cmd))
+			p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+			(pstdout, pstderr) = p.communicate()
+			if self.ofctl_logger:
+				self.ofctl_logger.debug("stdout: %s" % pstdout)
+			if p.poll():
+				self.logger.error("stderr: %s" % pstderr, exc_info=True)
 		
-		server.stop()
-		if socket_file:
-			os.remove(socket_file)
-		
-		return pstdout
+			server.stop()
+			
+			return pstdout
+		finally:
+			if socket_file:
+				os.remove(socket_file)
 	
 	def _make_ofctl_options(self, options):
 		# key name, double hyphn, take arg type, join with equal
-		fields = ("name", "detail", "argtype", "joinByEqual")
+		fields = ("name", "detail", "argtype", "joinWithEqual")
 		option_list = (
 			("strict", True, None, False),
 			("O", False, str, False), ("protocols", True, str, True),
@@ -527,7 +523,7 @@ class OvsController(BarrieredController):
 				ret.append(tmp)
 			else:
 				sval = str(opt_info["argtype"](value))
-				if opt_info["joinByEqual"] and len(sval):
+				if opt_info["joinWithEqual"] and len(sval):
 					ret.append(tmp+"="+sval)
 				else:
 					ret.append(tmp)
